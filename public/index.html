@@ -56619,7 +56619,7 @@ const PJ_WEBINAR_FIELDS = [
   {k:'targetAudience', l:'Target Audience', t:'text'},
   {k:'socialMedia', l:'Social Media', t:'text', ph:'Facebook, Instagram, YouTube…'},
   {k:'date', l:'Webinar Date', t:'date', req:1},
-  {k:'time', l:'Time', t:'text', ph:'7:00 PM or 19:00', h:'Indian time. The reminders and the 24-hour joining link are timed from it.'},
+  {k:'time', l:'Time', t:'time', h:'Indian time. Click the clock to pick it. The reminders and the 24-hour joining link are timed from it.'},
   {k:'campaignStart', l:'Campaign Start Date', t:'date'},
   {k:'registrationLink', l:'Registration Link', t:'text'},
   {k:'creativesApproved', l:'Creatives Approved', t:'select', opts:['Yes','No']},
@@ -56646,20 +56646,49 @@ function ppsWebinarsHtml(){
     }).join('') || `<tr><td colspan="7" class="empty">No webinars planned yet. New Webinar plans one, step by step.</td></tr>`}</tbody>
   </table></div>`;
 }
+/* The webinar's time is picked off a clock (an <input type="time">), which
+   reads and writes 24-hour "19:00". It is stored the way the invitations and
+   reminders print it, "7:00 PM", and the server's parseClock reads both.
+   Older rows were typed by hand ("7 PM", "7:30pm", "19:00"), so they are read
+   with the same rules as the server before the clock is shown. */
+function pjClock24(text){
+  const m = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?$/.exec(String(text||'').trim().toLowerCase());
+  if(!m) return '';
+  let h = Number(m[1]); const mi = Number(m[2] || 0);
+  const ampm = (m[3] || '').replace(/\./g, '');
+  if(ampm && (h < 1 || h > 12)) return '';
+  if(ampm === 'pm' && h < 12) h += 12;
+  if(ampm === 'am' && h === 12) h = 0;
+  if(h > 23 || mi > 59) return '';
+  return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0');
+}
+function pjClock12(hhmm){
+  const m = /^(\d{2}):(\d{2})$/.exec(String(hhmm||''));
+  if(!m) return '';
+  const h = Number(m[1]);
+  return (((h + 11) % 12) + 1) + ':' + m[2] + ' ' + (h < 12 ? 'AM' : 'PM');
+}
 function pjOpenWebinarForm(id){
   const w = id ? pjWebinars().find(x=>x.id===id) : {creativesApproved:'No', campaignLaunched:'No'};
   if(!w) return;
+  const shown = Object.assign({}, w, {time: pjClock24(w.time)});
   const checklist = id ? `<div class="card" style="margin:0 0 12px;padding:10px">
       <b style="font-size:13px">Planning checklist</b>
       ${PJ_WEBINAR_STEPS.map(([k,l])=>`<div style="font-size:13px;margin-top:4px">${pjWebinarStepDone(w,k)?'✅':'⬜'} ${esc(l)}</div>`).join('')}
     </div>` : '';
-  openModal(id ? 'Webinar — ' + (w.title||'') : 'New Webinar', checklist + PJ_WEBINAR_FIELDS.map(f=>fieldInput(f, w[f.k])).join(''),
+  openModal(id ? 'Webinar — ' + (w.title||'') : 'New Webinar', checklist + PJ_WEBINAR_FIELDS.map(f=>fieldInput(f, shown[f.k])).join(''),
     `<button class="btn" onclick="closeModal()">Cancel</button>${can('PPS', id?'edit':'create')? `<button class="btn primary" onclick="pjSaveWebinar('${esc(id||'')}')">Save</button>`:''}`);
 }
 async function pjSaveWebinar(id){
   if(!can('PPS', id ? 'edit' : 'create')){ alert('You do not have permission.'); return; }
   const data = readFields(PJ_WEBINAR_FIELDS);
   if(!validateRequired(PJ_WEBINAR_FIELDS, data)) return;
+  {
+    /* Saved as "7:00 PM". A hand-typed time the clock could not read is
+       kept as it was while the clock is left empty, rather than wiped. */
+    const old = id ? (pjWebinars().find(x=>x.id===id) || {}).time : '';
+    data.time = data.time ? pjClock12(data.time) : (old && !pjClock24(old) ? old : '');
+  }
   if(data.creativesApproved !== 'Yes' && data.campaignLaunched === 'Yes'){
     alert('The campaign is launched once the creatives are approved. Mark the creatives approved first.');
     return;
