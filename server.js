@@ -541,7 +541,16 @@ function smtpExplain(stage, code, text) {
  * The user supplies the endpoint their provider documents; this calls it for
  * real with the credential attached and reports the status line it got back.
  */
+/* An outbound request can end twice: a timeout destroys the socket, and the
+   destroy then raises 'error'. Answering the browser twice throws inside an
+   event handler, which nothing catches, and the whole process goes down. So
+   every request callback answers once and ignores what comes after. */
+function callOnce(cb) {
+  let done = false;
+  return (...args) => { if (done) return; done = true; cb(...args); };
+}
 function httpsProbe({ url, method, headers, body }, cb) {
+  cb = callOnce(cb);
   let target;
   try { target = new URL(url); } catch (e) { return cb({ ok: false, message: 'That is not a valid URL.' }); }
   if (target.protocol !== 'https:') return cb({ ok: false, message: 'Use an https:// endpoint — a credential must not travel over plain http.' });
@@ -577,6 +586,7 @@ function httpsProbe({ url, method, headers, body }, cb) {
 // httpsProbe reports whether a call worked; this one also hands back what
 // came back, for the calls where the answer is the point.
 function httpsProbeJson(opts, cb) {
+  cb = callOnce(cb);
   let target;
   try { target = new URL(opts.url); } catch (e) { return cb({ ok: false, message: 'That is not a valid URL.' }); }
   if (target.protocol !== 'https:') return cb({ ok: false, message: 'Use an https:// endpoint.' });
@@ -726,16 +736,34 @@ function usersPage({ error = null, added = null, removed = null, meId = null } =
 function sign(value) {
   return crypto.createHmac('sha256', SESSION_SECRET).update(String(value)).digest('hex');
 }
+/* The signature also covers a fingerprint of the account's password hash, so
+   a new password — chosen, reset or issued by an admin — ends every session
+   signed with the old one, including a cookie somebody copied. */
+function passwordStamp(userId) {
+  const u = findUserById.get(Number(userId));
+  return crypto.createHash('sha256').update(String((u && u.password_hash) || '')).digest('hex').slice(0, 16);
+}
 function issueToken(userId) {
   const exp = Date.now() + SESSION_MAX_AGE_MS;
-  return `${userId}.${exp}.${sign(userId + '.' + exp)}`;
+  return `${userId}.${exp}.${sign(userId + '.' + exp + '.' + passwordStamp(userId))}`;
+}
+// After a person changes their own password, the session they are using is
+// signed again so it is the one that survives.
+function renewSessionCookie(req, res, userId) {
+  res.cookie(COOKIE, issueToken(userId), {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: req.secure || req.get('x-forwarded-proto') === 'https',
+    maxAge: SESSION_MAX_AGE_MS,
+    path: '/',
+  });
 }
 function userIdFromToken(token) {
   if (!token || typeof token !== 'string') return null;
   const [id, exp, sig] = token.split('.');
   if (!id || !exp || !sig || !/^\d+$/.test(id) || !/^\d+$/.test(exp)) return null;
   if (Number(exp) < Date.now()) return null;
-  const expected = Buffer.from(sign(id + '.' + exp));
+  const expected = Buffer.from(sign(id + '.' + exp + '.' + passwordStamp(id)));
   const given = Buffer.from(sig);
   // Fixed-length compare: timingSafeEqual throws on a length mismatch.
   if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
@@ -961,6 +989,7 @@ app.post('/set-password', (req, res) => {
     return res.status(400).type('html').send(passwordFormPage({ title: 'Choose your password', error: 'Choose a password different from the one you were issued.',
       intro: 'You signed in with a password that was issued to you. Choose your own now.', action: '/set-password', hidden: { next } }));
   setOwnPassword.run(hashPassword(String(req.body.password)), u.id);
+  renewSessionCookie(req, res, u.id);
   res.redirect(next);
 });
 
@@ -980,6 +1009,7 @@ app.post('/api/me/password', checkApiKey, (req, res) => {
   if (wrong) return res.status(400).json({ ok: false, message: wrong });
   if (passwordMatches(String(body.password), u.password_hash)) return res.status(400).json({ ok: false, message: 'The new password is the same as the current one.' });
   setOwnPassword.run(hashPassword(String(body.password)), u.id);
+  renewSessionCookie(req, res, u.id);
   attempts.delete(ip);
   res.json({ ok: true, account: accountJson(findUserById.get(u.id)) });
 });
@@ -1347,10 +1377,17 @@ app.use((req, res, next) => {
 // Minimal shared-secret gate. Real per-user authentication is a separate, larger
 // project (see README.md) — this only stops the API being wide open to anyone
 // who finds the URL.
+// Compares two secrets in constant time, so the answer's timing says nothing
+// about how much of a guess was right.
+function sameSecret(given, want) {
+  const a = crypto.createHash('sha256').update(String(given == null ? '' : given)).digest();
+  const b = crypto.createHash('sha256').update(String(want == null ? '' : want)).digest();
+  return crypto.timingSafeEqual(a, b) && String(given) === String(want);
+}
 function checkApiKey(req, res, next) {
   if (!API_KEY) return next(); // no key configured — open access, fine for local/dev use only, see README
   const provided = req.get('X-API-Key');
-  if (provided !== API_KEY) return res.status(401).json({ error: 'Invalid or missing X-API-Key header' });
+  if (!sameSecret(provided, API_KEY)) return res.status(401).json({ error: 'Invalid or missing X-API-Key header' });
   next();
 }
 
@@ -1946,8 +1983,24 @@ app.put('/api/storage/:key', checkApiKey, (req, res) => {
 // The CRM uses this to drop stores belonging to features that were removed (the Incentive
 // and Appraisal modules, the old partner/level hierarchy), so their rows don't linger in
 // data.json or reappear in a full-system export.
+const CORE_STORE_KEYS = ['team', 'clients', 'leads', 'reviews', 'tasks', 'transactions', 'queries',
+  'queryReplies', 'docLinks', 'docSubmissions', 'recommendations', 'businessEntries', 'communications',
+  'hrAttendance', 'hrLeave', 'hrCompOff', 'auditLog', 'approvals', 'config', 'settings', 'apiConnectors',
+  'assetUploads', 'platformHoldings', 'platformSips', 'importBatches', 'partnerWebinars', 'pjOnboarding'];
 app.delete('/api/storage/:key', checkApiKey, (req, res) => {
   if (store[req.params.key] === undefined) return res.status(404).json({ error: 'not found' });
+  /* Deleting a key is emptying it in one go, past every guard a PUT has.
+     The firm's core lists and settings are only removed by an admin (Reset
+     System, a migration an admin runs). The per-upload stores and files
+     that ordinary work deletes are not in this list. */
+  {
+    const u = signedInUser(req);
+    const admin = !!(u && u.role === 'admin');
+    if (CORE_STORE_KEYS.includes(req.params.key) && !admin) {
+      console.error('Refused deleting ' + req.params.key + ' for a non-admin');
+      return res.status(403).json({ error: 'Not deleted: only an admin can remove ' + req.params.key + '.' });
+    }
+  }
   delete store[req.params.key];
   writeToDisk();
   publishChange([req.params.key], req.get('X-Client-Id') || '');
@@ -2095,7 +2148,7 @@ app.get('/api/connections', checkApiKey, (req, res) => {
 // PUT /api/connections/:id  body: { config, enabled, secrets }
 // A secret arriving as an empty string means "keep what is stored"; sending
 // null for one clears it.
-app.put('/api/connections/:id', checkApiKey, (req, res) => {
+app.put('/api/connections/:id', checkApiKey, requireApiAdmin, (req, res) => {
   const id = req.params.id;
   if (!CONNECTOR_KIND[id]) return res.status(404).json({ error: 'unknown connector: ' + id });
   const body = req.body || {};
@@ -2158,7 +2211,10 @@ function buildMessage({ fromEmail, fromName, to, cc, replyTo, subject, body, htm
     'To: ' + to.join(', '),
   ];
   if (cc && cc.length) headers.push('Cc: ' + cc.join(', '));
-  if (replyTo) headers.push('Reply-To: ' + replyTo);
+  // Reply-To arrives from the caller: one plain address, or nothing. A CR or
+  // LF in it would start a header of the caller's own.
+  const reply = String(replyTo || '').trim();
+  if (reply && ADDRESS_RE.test(reply)) headers.push('Reply-To: ' + reply);
   headers.push('Subject: ' + encodeHeader(subject));
   headers.push('Date: ' + boundaryDate);
   headers.push('Message-ID: ' + id);
@@ -2202,6 +2258,7 @@ function cleanAddresses(value) {
 // uses: no user sits in front of this, so there is nobody to send to a consent
 // screen. The secret never leaves this process.
 function graphToken(config, secrets, cb) {
+  cb = callOnce(cb);
   const body = new URLSearchParams({
     client_id: config.clientId || '',
     client_secret: secrets.clientSecret || '',
@@ -2996,8 +3053,48 @@ function privateHost(hostname) {
   if (a === 172 && b >= 16 && b <= 31) return true;
   return false;
 }
+function hostOf(url) {
+  try { return new URL(String(url || '')).hostname.toLowerCase(); } catch (e) { return ''; }
+}
+/* Where a connector's stored credential may go: the hosts saved with it,
+   or, for a credential saved before that, the base URL and token URL on the
+   connector as configured. */
+function apiConnHosts(id) {
+  const entry = apiConnEntry(id);
+  if (Array.isArray(entry.hosts) && entry.hosts.length) return entry.hosts;
+  const c = shareConnector(id) || {};
+  return [c.baseUrl, (c.auth || {}).tokenUrl].map(hostOf).filter(Boolean);
+}
+function credentialHostProblem(id, url) {
+  const allowed = apiConnHosts(id);
+  const h = hostOf(url);
+  if (!h) return 'That is not a valid URL.';
+  if (!allowed.includes(h))
+    return 'The stored credential belongs to ' + (allowed.join(', ') || 'no saved address') + ', not ' + h + '. Save the connector with this address first.';
+  return '';
+}
+/* privateHost looks at the name as written; a public name can still point
+   at this machine or its network. The address the name resolves to is
+   checked as the connection is made. */
+const dns = require('dns');
+function privateAddress(ip) {
+  const a = String(ip || '').toLowerCase().replace(/^::ffff:/, '');
+  if (a === '::1' || a === '::' || a.startsWith('fe80:') || a.startsWith('fc') || a.startsWith('fd')) return true;
+  return privateHost(a);
+}
+function publicOnlyLookup(hostname, options, cb) {
+  if (typeof options === 'function') { cb = options; options = {}; }
+  dns.lookup(hostname, options, (err, address, family) => {
+    if (err) return cb(err);
+    const list = Array.isArray(address) ? address : [{ address, family }];
+    if (list.some((x) => privateAddress(x.address)))
+      return cb(Object.assign(new Error('that address is on this server\'s own network'), { code: 'EPRIVATE' }));
+    cb(null, address, family);
+  });
+}
 /* The one outbound call, with the stored credential put on it here. */
 function apiConnFetch(opts, cb) {
+  cb = callOnce(cb);
   let target;
   try { target = new URL(opts.url); } catch (e) { return cb({ ok: false, status: 0, message: 'That is not a valid URL.' }); }
   if (target.protocol !== 'https:')
@@ -3009,7 +3106,8 @@ function apiConnFetch(opts, cb) {
     hostname: target.hostname, port: target.port || 443,
     path: target.pathname + target.search, method: opts.method || 'GET',
     headers: Object.assign({ 'User-Agent': 'BOSS-CRM/1.0', 'Accept': 'application/json' }, opts.headers || {}),
-    timeout: Number(opts.timeout) || 20000,
+    timeout: Math.min(Math.max(Number(opts.timeout) || 20000, 1000), 60000),
+    lookup: publicOnlyLookup,
   }, (res) => {
     let data = '', over = false;
     res.setEncoding('utf8');
@@ -3050,7 +3148,7 @@ app.get('/api/apiconnectors', checkApiKey, (req, res) => {
 /* PUT /api/apiconnectors/:id  { secret, shareToken }
    '' leaves what is stored alone; null clears it; anything else replaces
    it. Nothing here is ever read back out. */
-app.put('/api/apiconnectors/:id', checkApiKey, (req, res) => {
+app.put('/api/apiconnectors/:id', checkApiKey, requireApiAdmin, (req, res) => {
   const id = String(req.params.id || '').slice(0, 80);
   if (!/^[A-Za-z0-9_\-:.]+$/.test(id)) return res.status(400).json({ error: 'bad connector id' });
   const key = API_CONN_PREFIX + id;
@@ -3061,13 +3159,18 @@ app.put('/api/apiconnectors/:id', checkApiKey, (req, res) => {
     if (v === null) { delete entry.secrets[k]; return; }
     if (typeof v === 'string' && v.length) entry.secrets[k] = v;
   });
+  /* The hosts the credential is for, set by the admin who saved it. A call
+     that carries the credential anywhere else is refused, so the proxy is
+     not a way to post somebody's API key to a server of one's own. */
+  const hosts = [(req.body || {}).baseUrl, (req.body || {}).tokenUrl].map(hostOf).filter(Boolean);
+  if (hosts.length) entry.hosts = Array.from(new Set(hosts));
   entry.updatedAt = new Date().toISOString();
   connections[key] = entry;
   writeConnections();
   const s = entry.secrets;
   res.json({ id, hasSecret: !!s.secret, hasShareToken: !!s.shareToken });
 });
-app.delete('/api/apiconnectors/:id', checkApiKey, (req, res) => {
+app.delete('/api/apiconnectors/:id', checkApiKey, requireApiAdmin, (req, res) => {
   const key = API_CONN_PREFIX + req.params.id;
   if (!connections[key]) return res.status(404).json({ error: 'nothing stored for that connector' });
   delete connections[key];
@@ -3088,6 +3191,8 @@ app.post('/api/apiconnectors/:id/call', checkApiKey, (req, res) => {
   if (auth.kind && auth.kind !== 'none') {
     if (!secret) return res.json({ ok: false, status: 0,
       message: 'No credential is stored for this connector. Paste it in Setup and save, then try again.' });
+    const wrongHost = credentialHostProblem(id, url);
+    if (wrongHost) return res.json({ ok: false, status: 0, message: wrongHost });
     if (auth.kind === 'bearer') headers['Authorization'] = 'Bearer ' + secret;
     else if (auth.kind === 'basic') headers['Authorization'] = 'Basic ' + Buffer.from(String(auth.username || '') + ':' + secret).toString('base64');
     else if (auth.kind === 'header') headers[String(auth.headerName || 'X-API-Key')] = String(auth.prefix || '') + secret;
@@ -3107,6 +3212,8 @@ app.post('/api/apiconnectors/:id/token', checkApiKey, (req, res) => {
   const b = req.body || {};
   const secret = (apiConnEntry(String(req.params.id || '')).secrets || {}).secret || '';
   if (!secret) return res.json({ ok: false, message: 'No client secret is stored for this connector.' });
+  const wrongHost = credentialHostProblem(String(req.params.id || ''), b.url);
+  if (wrongHost) return res.json({ ok: false, message: wrongHost });
   const form = 'grant_type=client_credentials'
     + '&client_id=' + encodeURIComponent(String(b.clientId || ''))
     + '&client_secret=' + encodeURIComponent(secret)
@@ -3136,7 +3243,7 @@ function shareAuthorised(req, id) {
   const want = (apiConnEntry(id).secrets || {}).shareToken || '';
   const got = String(req.query.token || req.get('X-Share-Token') || '');
   if (!want) return 'No share token is set for this connector.';
-  if (got.length !== want.length || got !== want) return 'That token is not the one for this connector.';
+  if (!sameSecret(got, want)) return 'That token is not the one for this connector.';
   return '';
 }
 app.get('/api/share/:id', (req, res) => {
@@ -3215,7 +3322,7 @@ app.post('/api/share/:id', (req, res) => {
 
 // DELETE /api/connections/:id — forgets the stored credential entirely, for
 // when a connector is being retired or a key has to be revoked.
-app.delete('/api/connections/:id', checkApiKey, (req, res) => {
+app.delete('/api/connections/:id', checkApiKey, requireApiAdmin, (req, res) => {
   const id = req.params.id;
   if (!connections[id]) return res.status(404).json({ error: 'nothing stored for ' + id });
   delete connections[id];
@@ -3224,7 +3331,7 @@ app.delete('/api/connections/:id', checkApiKey, (req, res) => {
 });
 
 // POST /api/connections/:id/test -> runs a real check and records what happened
-app.post('/api/connections/:id/test', checkApiKey, (req, res) => {
+app.post('/api/connections/:id/test', checkApiKey, requireApiAdmin, (req, res) => {
   const id = req.params.id;
   const kind = CONNECTOR_KIND[id];
   if (!kind) return res.status(404).json({ error: 'unknown connector: ' + id });
@@ -3405,6 +3512,7 @@ function aiProviderCall({ id, kind, config, secrets, system, messages, maxTokens
    fine — the traffic never leaves their infrastructure — so this one allows
    it where the outward-facing probe does not. Everything else is identical. */
 function httpProbeJsonAny(opts, cb) {
+  cb = callOnce(cb);
   let target;
   try { target = new URL(opts.url); } catch (e) { return cb({ ok: false, message: 'That is not a valid URL.' }); }
   const lib = target.protocol === 'http:' ? http : https;
@@ -3678,6 +3786,12 @@ app.post('/api/users/sync', checkApiKey, requireApiAdmin, (req, res) => {
   // the accounts were made lines up with them.
   const existing = byMember || (byEmail && !byEmail.member_id ? byEmail : null);
   if (existing) {
+    // The last active admin cannot be demoted or deactivated: nobody would
+    // be left who can manage accounts. /users/delete has the same rule.
+    if (existing.role === 'admin' && (role !== 'admin' || !active)
+        && listUsers.all().filter((u) => u.role === 'admin' && u.active !== 0).length <= 1) {
+      return res.status(409).json({ ok: false, message: 'This is the only admin account. Make somebody else an admin first.' });
+    }
     updateUserAccount.run(email, role, memberId, crmRole, active, existing.id);
     const after = findUserById.get(existing.id);
     return res.json({ ok: true, created: false, adopted: !byMember, account: accountJson(after) });
@@ -3743,6 +3857,7 @@ app.post('/api/account/password', checkApiKey, (req, res) => {
   if (passwordMatches(next, user.password_hash)) return res.status(400).json({ ok: false, field: 'password', message: 'Choose a password different from the current one.' });
   attempts.delete(key);
   setOwnPassword.run(hashPassword(next), user.id);
+  renewSessionCookie(req, res, user.id);
   res.json({ ok: true, account: accountJson(findUserById.get(user.id)) });
 });
 
@@ -4205,6 +4320,43 @@ const PUBLIC_UPDATE_KEYS = ['docLinks', 'leads', 'clients', 'reviews', 'recommen
   'tasks', 'transactions', 'businessEntries'];
 // A row is this token's business if it IS one of its records, or if it hangs
 // off one — the task chasing this form, the transaction from this allocation.
+/* The fields that decide what a record is linked to and who owns it. A
+   client's link may fill in their answers, but these only change inside the
+   CRM: otherwise one link could point its own lead at somebody else's client
+   record and read or rewrite it from then on. An unchanged value passes, so a
+   page that sends its whole copy back is not refused. */
+const PUBLIC_LOCKED_FIELDS = ['id', '_mt', 'token', 'supportToken', 'ctFormToken',
+  'leadId', 'clientId', 'recordId', 'recordModule', 'reviewId', 'allocationId', 'queryId', 'refId',
+  'convertedToClientId', 'convertedFromLeadId', 'userId', 'memberId',
+  'assignedTo', 'assignTo', 'rmName', 'parentUserId', 'createdBy', 'ownerId', 'approverId',
+  'deletedAt', 'deletedBy'];
+function withoutLockedChanges(stored, incoming) {
+  if (!incoming || typeof incoming !== 'object') return incoming;
+  const out = Object.assign({}, incoming);
+  PUBLIC_LOCKED_FIELDS.forEach((f) => {
+    if (f in out && JSON.stringify(out[f]) !== JSON.stringify(stored[f])) delete out[f];
+  });
+  return out;
+}
+// The fields a new row from a public page may use to hang off a record.
+const PUBLIC_LINK_FIELDS = ['leadId', 'clientId', 'recordId', 'reviewId', 'allocationId', 'queryId', 'refId',
+  'convertedToClientId', 'convertedFromLeadId'];
+/* A new row from a client's link is theirs only if everything it hangs off is
+   this link's (or another row added in the same submission). A submission
+   names the link it came back on; a notification goes to the adviser who owns
+   the record, and nobody else. */
+function appendProblem(key, row, scope, fresh) {
+  const ok = (v) => scope.ids.has(v) || fresh.has(v);
+  for (const f of PUBLIC_LINK_FIELDS) {
+    if (row[f] && !ok(row[f])) return f;
+  }
+  if (key === 'docSubmissions' && row.token && row.token !== scope.token) {
+    const link = storeList('docLinks').find((l) => l && l.token === row.token);
+    if (!link || !(ok(link.leadId) || ok(link.recordId) || ok(link.allocationId))) return 'token';
+  }
+  if (key === 'notifications' && row.userId && !(scope.owner && scope.owner.id === row.userId)) return 'userId';
+  return '';
+}
 function rowInScope(row, scope) {
   if (!row) return false;
   if (scope.ids.has(row.id)) return true;
@@ -4315,9 +4467,19 @@ app.post('/api/public/patch', (req, res) => {
         : 'Some of what was sent is not valid: ' + wrong.map((w) => w.message).join(' ') });
   }
 
+  // Rows this submission creates, which its other rows may hang off.
+  const fresh = new Set();
+  for (const [key, rows] of Object.entries(appends)) {
+    if (!PUBLIC_APPEND_KEYS.includes(key) || !Array.isArray(rows)) continue;
+    const have = new Set(storeList(key).map((x) => x && x.id));
+    rows.forEach((row) => { if (row && row.id && !have.has(row.id)) fresh.add(row.id); });
+  }
   for (const [key, rows] of Object.entries(appends)) {
     if (!PUBLIC_APPEND_KEYS.includes(key)) { refused.push('add to ' + key); continue; }
     if (!Array.isArray(rows) || !rows.length) continue;
+    const bad = rows.map((row) => row && typeof row === 'object' ? appendProblem(key, row, scope, fresh) : '')
+      .filter(Boolean);
+    if (bad.length) { refused.push('add to ' + key + ' (' + bad[0] + ')'); appends[key] = []; continue; }
     const list = storeList(key);
     const have = new Set(list.map((x) => x && x.id));
     rows.forEach((row) => {
@@ -4360,7 +4522,7 @@ app.post('/api/public/patch', (req, res) => {
         // …and an ISEQ, whichever link it came back on. A submission whose
         // link has gone still names its lead, so it is applied from the row.
         if (link) applyIseqSubmissionToOwner(link, row);
-        else if (row.leadId) applyIseqSubmissionToOwner({ leadId: row.leadId }, row);
+        else if (row.leadId && scope.ids.has(row.leadId)) applyIseqSubmissionToOwner({ leadId: row.leadId }, row);
         applyFqSubmissionToLead(link || { leadId: row.leadId }, row);
       });
       // …and whoever owns that record is told, so a submission that lands
@@ -4386,11 +4548,12 @@ app.post('/api/public/patch', (req, res) => {
       // the fields it changed (__set / __unset); an older page sent its whole
       // copy, which is still merged as it always was.
       if (row && row.__set && typeof row.__set === 'object') {
-        const set = Object.assign({}, row.__set); delete set.id; delete set._mt;
+        const set = withoutLockedChanges(list[idx], row.__set); delete set.id; delete set._mt;
         const next = mergeFromClient(list[idx], set);
-        (Array.isArray(row.__unset) ? row.__unset : []).forEach((f) => { if (f !== 'id' && f !== '_mt' && f !== 'formData') delete next[f]; });
+        (Array.isArray(row.__unset) ? row.__unset : []).forEach((f) => {
+          if (f !== 'formData' && !PUBLIC_LOCKED_FIELDS.includes(f)) delete next[f]; });
         list[idx] = next;
-      } else list[idx] = mergeFromClient(list[idx], row);
+      } else list[idx] = mergeFromClient(list[idx], withoutLockedChanges(list[idx], row));
       touched = true;
     }
     if (touched) putList(key, list);
@@ -4498,10 +4661,23 @@ app.post('/api/public/approval', (req, res) => {
 
 // The mails a client's own page sends: their score card, their copy of a form,
 // the note that tells their adviser they have answered.
+/* A client's link may send the handful of letters its own flow sends (a
+   copy of what they submitted, the adviser told). It is not a mail server:
+   a link that keeps sending is told to wait. */
+const publicMailHits = new Map();
+function publicMailThrottled(token) {
+  const now = Date.now();
+  const hits = (publicMailHits.get(token) || []).filter((t) => now - t < 60 * 60 * 1000);
+  hits.push(now);
+  publicMailHits.set(token, hits);
+  if (publicMailHits.size > 5000) publicMailHits.clear();
+  return hits.length > 20;
+}
 app.post('/api/public/mail', (req, res) => {
   const scope = publicScope(String(req.query.token || ''));
   res.set('Cache-Control', 'no-store');
   if (!scope) return res.status(404).json({ ok: false, message: 'This link is not valid any more.' });
+  if (publicMailThrottled(scope.token)) return res.status(429).json({ ok: false, message: 'Too many letters from this link. Try again in an hour.' });
   sendMailRequest(req.body || {}, res, publicMailTargets(scope));
 });
 

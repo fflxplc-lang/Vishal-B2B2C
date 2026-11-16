@@ -46,7 +46,8 @@ r.get('/', (req, res) => {
     noRM: all.filter((c) => !c.hasRM).length,
     noBM: all.filter((c) => !c.hasBM).length,
     noFolios: all.filter((c) => !c.folios.length).length,
-    orphanFolios: db.prepare(`SELECT COUNT(DISTINCT b.folio) c FROM brokerage b ${LIVE} WHERE b.client_id IS NULL`).get().c,
+    // Folios with no client are firm-wide (and nobody's to see but an admin).
+    orphanFolios: req.user.role === 'admin' ? db.prepare(`SELECT COUNT(DISTINCT b.folio) c FROM brokerage b ${LIVE} WHERE b.client_id IS NULL`).get().c : 0,
   };
   let list = all;
   if (filter === 'noRM') list = list.filter((c) => !c.hasRM);
@@ -60,8 +61,10 @@ r.get('/', (req, res) => {
   res.json({ rows: list.slice((page - 1) * size, page * size), total: list.length, page, size, counts });
 });
 
-// Folios that carry brokerage but belong to no client.
-r.get('/orphan-folios', (_req, res) => {
+// Folios that carry brokerage but belong to no client. They are on nobody's mapping, so only an
+// admin sees them; anyone else gets an empty list (the Clients screen shows "none").
+r.get('/orphan-folios', (req, res) => {
+  if (req.user.role !== 'admin') return res.json([]);
   res.json(db.prepare(`SELECT b.folio, MAX(b.investor) investor, MAX(b.pan) pan, COUNT(*) txns, SUM(b.amount) gross
     FROM brokerage b ${LIVE} WHERE b.client_id IS NULL GROUP BY b.folio ORDER BY gross DESC`).all());
 });

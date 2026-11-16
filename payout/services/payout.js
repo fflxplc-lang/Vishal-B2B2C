@@ -62,17 +62,22 @@ export function splitGross(gross, hierarchy, ctx, leadById = null) {
     out.set(k, cur);
   };
 
-  // 1. Top share, passed upward when a level is empty.
+  // 1. Top share, passed upward when a level is empty. A person's custom % replaces the policy
+  //    share for their level; the top shares together never pass 100%, and the pool is what is
+  //    left after the larger of the policy total and what was actually handed out, so an
+  //    override above the policy comes out of the pool rather than on top of the brokerage.
   const topLevels = sortedLevels(sharing.top);
-  const topTotal = topLevels.reduce((s, l) => s + Number(sharing.top[l] || 0), 0);
-  let carry = 0;
+  const topTotal = topLevels.reduce((s, l) => s + Math.max(0, Number(sharing.top[l]) || 0), 0);
+  let carry = 0, topUsed = 0;
   for (const lvl of topLevels) {
     const uid = who(lvl);
-    const pct = carry + (uid ? (override(ctx.users.get(uid), lvl) ?? Number(sharing.top[lvl] || 0)) : Number(sharing.top[lvl] || 0));
-    if (uid) { add(uid, lvl, pct); carry = 0; } else carry = pct;
+    const want = Math.max(0, uid ? (override(ctx.users.get(uid), lvl) ?? Number(sharing.top[lvl] || 0)) : Number(sharing.top[lvl] || 0));
+    const pct = Math.min(want, Math.max(0, 100 - topUsed));
+    topUsed += pct;
+    if (uid) { add(uid, lvl, carry + pct); carry = 0; } else carry += pct;
   }
   if (carry > 0) add(null, 7, carry);
-  const pool = Math.max(0, 100 - topTotal);
+  const pool = Math.max(0, 100 - Math.max(topTotal, topUsed));
 
   // 2. Handler = lowest assigned level; manager = nearest L4+ above them.
   let lead = 0;
@@ -87,16 +92,16 @@ export function splitGross(gross, hierarchy, ctx, leadById = null) {
   const src = lb && ctx.users.get(lb.id) ? { id: lb.id, level: lb.level ?? ctx.users.get(lb.id).level } : null;
   if (src && src.id !== handler && src.level >= 4 && src.level > lead) {
     // 3. Passed-down lead: lead fee first, then the handler's % of what is left.
-    const fee = Math.min(pool, Number(sharing.leadFee) || 0);
+    const fee = Math.max(0, Math.min(pool, Number(sharing.leadFee) || 0));
     add(src.id, src.level, fee);
     const left = pool - fee;
     if (lead <= 3) {
-      const own = left * Math.min(100, rmRate(ctx.users.get(handler), lead, sharing)) / 100;
+      const own = left * Math.max(0, Math.min(100, rmRate(ctx.users.get(handler), lead, sharing))) / 100;
       add(handler, lead, own);
       if (mgr) add(who(mgr), mgr, left - own); else add(src.id, src.level, left - own);
     } else add(handler, lead, left);
   } else if (lead <= 3) {
-    const own = Math.min(pool, rmRate(ctx.users.get(handler), lead, sharing));
+    const own = Math.max(0, Math.min(pool, rmRate(ctx.users.get(handler), lead, sharing)));
     add(handler, lead, own);
     add(mgr ? who(mgr) : null, mgr || 7, pool - own);
   } else add(handler, lead, pool);

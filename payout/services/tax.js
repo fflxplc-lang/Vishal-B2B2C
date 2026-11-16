@@ -9,5 +9,7 @@ export function invoiceTax(base) {
   const gstPct = Number(inv.gstPct ?? getSetting('firm').gst ?? 18) || 0;
   const gst = inv.gstEnabled ? base * gstPct / 100 : 0;
   const tds = inv.tdsEnabled ? base * (Number(inv.tdsPct) || 0) / 100 : 0;
-  return { gst: round2(gst), tds: round2(tds), net: round2(base + gst - tds), gstPct };
+  // Net is built from the rounded parts, so it always equals what the invoice shows.
+  const g = round2(gst), t = round2(tds);
+  return { gst: g, tds: t, net: round2(base + g - t), gstPct };
 }

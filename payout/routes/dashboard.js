@@ -73,7 +73,8 @@ r.get('/', (req, res) => {
   for (let i = 5; i >= 0; i--) months.push(shiftPeriod(latest, -i));
   const revenue = months.map((m) => {
     const g = db.prepare(`SELECT COALESCE(SUM(b.amount),0) s FROM brokerage b ${LIVE} WHERE b.period = ? ${mine}`).get(...p(m)).s;
-    const share = db.prepare(`SELECT COALESCE(SUM(l.amount),0) s FROM payout_lines l WHERE l.period = ? AND ${uid ? `l.user_id ${IN_SCOPE}` : 'l.user_id IS NOT NULL'}`).get(...(uid ? [m, uid] : [m])).s;
+    const share = db.prepare(`SELECT COALESCE(SUM(l.amount),0) s FROM payout_lines l JOIN brokerage b ON b.id = l.brokerage_id ${LIVE}
+      WHERE l.period = ? AND ${uid ? `l.user_id ${IN_SCOPE}` : 'l.user_id IS NOT NULL'}`).get(...(uid ? [m, uid] : [m])).s;
     return { period: m, gross: g, share };
   });
 

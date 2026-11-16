@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# One-shot setup (and update) of the B2C app at boss.finowise.com on the VPS.
-# Run as root, with a GitHub token that can read fflxplc-lang/FINOWISE_BOSS
-# (not needed once install-autodeploy.sh has given the server its deploy key):
+# One-shot setup (and update) of BOSS (Vishal-B2B2C) on the VPS, at $DOMAIN.
+# Run as root. If the repository is private, with a GitHub token that can read
+# fflxplc-lang/Vishal-B2B2C (not needed once install-autodeploy.sh has given
+# the server its deploy key):
 #   export GH_TOKEN=ghp_xxx
 #   bash setup.sh
-# Touches only finowise-b2c things; never the production CRM (finowise user,
+# Touches only vishal-b2b2c things; never the production CRM (finowise user,
 # port 3000, "lifex" site) or the test copy (finowise-test, port 3001).
 # Safe to re-run: later runs pull the latest code and restart the app.
 set -euo pipefail
@@ -70,8 +71,10 @@ if [ -n "$ZIP" ]; then
   [ -f "$ZIP" ] || die "no file at ZIP=$ZIP"
   TMP=$(mktemp -d)
   unzip -q "$ZIP" -d "$TMP"
-  SRC=$(dirname "$(find "$TMP" -maxdepth 3 -name server.js | head -1)")
-  [ -f "$SRC/server.js" ] || die "the zip has no server.js"
+  FOUND=$(find "$TMP" -maxdepth 3 -name server.js | head -1)
+  # Checked before dirname: dirname of nothing is ".", the folder this was run from.
+  [ -n "$FOUND" ] || { rm -rf "$TMP"; die "the zip has no server.js"; }
+  SRC=$(dirname "$FOUND")
   rm -rf $APP.new && mkdir -p $APP.new && cp -a "$SRC/." $APP.new/
   rm -rf $APP.old; [ -d $APP ] && mv $APP $APP.old; mv $APP.new $APP
   rm -rf "$TMP"
@@ -80,7 +83,12 @@ else
   AUTH=""
   [ -n "${GH_TOKEN:-}" ] && AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
   gitauth() { if [ -n "$AUTH" ]; then git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" "$@"; else git "$@"; fi; }
-  if [ -d $APP/.git ]; then
+  if [ -d $APP/.git ] && [[ "$(git -C $APP remote get-url origin 2>/dev/null)" == git@github.com:* ]]; then
+    # install-autodeploy.sh moved the checkout to the app user's deploy key;
+    # root has no key, so the app user fetches.
+    runuser -u $U -- git -C $APP fetch -q origin $BRANCH
+    runuser -u $U -- git -C $APP reset -q --hard origin/$BRANCH
+  elif [ -d $APP/.git ]; then
     gitauth -C $APP fetch -q origin $BRANCH
     git -C $APP reset -q --hard origin/$BRANCH
   else

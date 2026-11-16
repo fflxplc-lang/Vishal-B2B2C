@@ -4,6 +4,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 const DB_PATH = process.env.CRM_PAYOUT_DB || path.resolve(process.cwd(), 'payout.db');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -169,6 +170,18 @@ for (const t of ['brokerage', 'partner_rows']) {
   if (!db.prepare(`PRAGMA table_info(${t})`).all().some((c) => c.name === 'map_snapshot')) db.exec(`ALTER TABLE ${t} ADD COLUMN map_snapshot TEXT`);
 }
 
+// batches.fingerprint (added later): a hash of an import's parsed rows, so the same statement
+// can't be imported (and paid) twice. Older batches have none and are matched on their totals.
+if (!db.prepare('PRAGMA table_info(batches)').all().some((c) => c.name === 'fingerprint')) db.exec('ALTER TABLE batches ADD COLUMN fingerprint TEXT');
+// users.auto_admin (added later): 1 when the admin role was handed out automatically because the
+// person was a CRM admin on their first visit, not set on purpose in Hierarchy. auth.js takes such
+// a role away again once they are no longer a CRM admin. Back-filled from the audit trail.
+if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'auto_admin')) {
+  db.exec('ALTER TABLE users ADD COLUMN auto_admin INTEGER DEFAULT 0');
+  db.exec(`UPDATE users SET auto_admin = 1 WHERE role = 'admin' AND id IN (SELECT user_id FROM audit
+    WHERE action = 'USER_CREATE' AND description LIKE '% added as a payout admin on first visit')`);
+}
+
 export const LEVEL_NAMES = {
   1: 'Ninja', 2: 'Super Ninja', 3: 'Sherpa', 4: 'Master Sherpa',
   5: 'Monks', 6: 'Zen Monks', 7: 'Company',
@@ -201,6 +214,23 @@ export function tx(fn) {
   db.exec('BEGIN');
   try { const r = fn(); db.exec('COMMIT'); return r; }
   catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+
+// Duplicate imports. An import's fingerprint is a hash of what was read from the file (not of its
+// bytes), so the same statement saved again, or as CSV instead of Excel, is still recognised.
+export function fingerprintOf(kind, variant, rows) {
+  return crypto.createHash('sha256').update(JSON.stringify([kind, variant || '', rows])).digest('hex');
+}
+// A live batch of the same kind, source, variant and month with the same content, or null. Batches
+// imported before fingerprints existed are matched on their row counts and total instead.
+export function duplicateBatch({ kind, source, variant, period, fingerprint, rows, rawRows, total }) {
+  return db.prepare(`SELECT id, file_name, period FROM batches WHERE status = 'live' AND kind = ? AND source = ? AND COALESCE(variant, '') = ? AND period = ?
+      AND (fingerprint = ? OR (fingerprint IS NULL AND rows = ? AND raw_rows = ? AND ABS(total - ?) < 0.005))
+    ORDER BY id LIMIT 1`).get(kind, source, variant || '', period, fingerprint, rows, rawRows, total) || null;
+}
+export function duplicateError(dup) {
+  return Object.assign(new Error(`This file (or one identical to it) was already imported for ${dup.period} as batch #${dup.id} (${dup.file_name}). `
+    + 'Move that batch to the trash first if you want to re-import it.'), { status: 409, code: 'DUPLICATE_IMPORT', batchId: dup.id });
 }
 
 export function audit(user, action, description) {

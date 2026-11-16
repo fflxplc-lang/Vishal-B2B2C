@@ -3673,6 +3673,16 @@ function apiHeaders(){
   return h;
 }
 function uid(prefix){ return prefix+'-'+Math.random().toString(36).slice(2,7).toUpperCase()+Date.now().toString().slice(-4); }
+/* A link a client opens without signing in is only as private as its token
+   is hard to guess. uid() is an id, not a secret (five Math.random
+   characters), so a link's token is 24 random bytes from the browser's
+   cryptographic generator instead. */
+function linkToken(prefix){
+  const bytes = new Uint8Array(24);
+  if(window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+  else bytes.forEach((_, i)=>{ bytes[i] = Math.floor(Math.random()*256); });
+  return prefix + '-' + Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join('').toUpperCase();
+}
 /* Every date and every amount in the CRM goes through these two, so the
    Localisation settings reach the whole app without touching a record. Both
    are called before the settings load on first paint, hence the fallbacks. */
@@ -17967,7 +17977,11 @@ async function planSyncActionsToDst(record, live, io){
     const text = desc + ' — action point from the Execution Plan for ' + about;
     let task = seActionTask(a);
     if(!task){
-      task = {id:uid('DST'), taskType:SE_ACTION_TASK_TYPE, assignTo:owner, assignedDate:today,
+      /* An action point can already be overdue when it is written down. Its
+         task is then assigned on its due date, not today: "assigned today,
+         due last week" is refused by the server, and the refusal takes every
+         other task change in the same save down with it. */
+      task = {id:uid('DST'), taskType:SE_ACTION_TASK_TYPE, assignTo:owner, assignedDate: due < today ? due : today,
         dueDate:due, urgencyLevel:'Medium', priorityLevel:'Medium',
         overallStatus: seActionStatusToTask(a.status), description:text,
         sourceModule: io.source};
@@ -17982,7 +17996,11 @@ async function planSyncActionsToDst(record, live, io){
     // The sheet was edited since the task was raised: the task follows it.
     if(task.description!==text){ task.description = text; touched = true; }
     if(task.assignTo!==owner){ task.assignTo = owner; touched = true; }
-    if(task.dueDate!==due){ task.dueDate = due; touched = true; }
+    if(task.dueDate!==due){
+      task.dueDate = due;
+      if(task.assignedDate && due < String(task.assignedDate).slice(0,10)) task.assignedDate = due;
+      touched = true;
+    }
     // Status is the one field both sides write, so the row remembers what it
     // last agreed with the task. Whichever of the two has moved since then is
     // the one that is right; if neither has, there is nothing to do. Without
@@ -28209,7 +28227,7 @@ function openSendPlanFormModal(module, recordId, transitionId){
 async function submitSendPlanForm(recordId, transitionId){
   const record = DB.leads.find(r=>r.id===recordId); if(!record) return;
   const type = leadApproachForm(record) || 'SINGLEGOAL';
-  const token = uid('DOC');
+  const token = linkToken('DOC');
   // The client sees the sheet as the adviser left it — including the firm's
   // assumptions, which are answers like any other and theirs to change.
   const prefill = Object.assign(planFieldDefaults(type), leadFormData(record, type));
@@ -29261,7 +29279,9 @@ async function createMomActionTasks(module, record, points, which){
     // action it actually is.
     const theirs = a.owner===MOM_SUBJECT_OWNER;
     const task = {id:uid('DST'), taskType:'Meeting Action Point',
-      assignTo: theirs ? fallbackOwner : (a.owner || fallbackOwner), assignedDate: today,
+      assignTo: theirs ? fallbackOwner : (a.owner || fallbackOwner),
+      // An overdue point is assigned on its due date: due before assigned is refused.
+      assignedDate: (a.due && a.due < today) ? a.due : today,
       dueDate: a.due || futureDate(3), urgencyLevel:'Medium', priorityLevel:'Medium',
       overallStatus:'Not Started', responsibleParty: theirs ? about : undefined,
       description: (theirs ? about + ' to: ' : '') + a.text + ' — action point from the ' + which + ' with ' + about};
@@ -32227,7 +32247,7 @@ function queryOwnerFor(q){
 async function clientSupportToken(clientId){
   const c = DB.clients.find(x=>x.id===clientId); if(!c) return '';
   if(!c.supportToken){
-    c.supportToken = uid('SUP');
+    c.supportToken = linkToken('SUP');
     await save('clients');
   }
   return c.supportToken;
@@ -50146,7 +50166,7 @@ function sendAllocationToClient(id){
     return;
   }
   const c = allocRecipientRecord(r);
-  const token = uid('DOC');
+  const token = linkToken('DOC');
   const vars = Object.assign(allocMailVars(r), {Link: docUrl(token)});
   const tpl = DB.config.mailTemplates.allocApproval || {subject:'Investment Consent', body:''};
   window._allocSend = {id: plans.map(p=>p.id), token};
@@ -50196,7 +50216,7 @@ async function deliverAllocationToClient(id, composed){
   }
   // A sheet prepared for a lead goes to the lead; nobody has to convert them first.
   const c = allocRecipientRecord(r);
-  const token = (composed && composed.token) || uid('DOC');
+  const token = (composed && composed.token) || linkToken('DOC');
   DB.docLinks.push({token, type:'ALLOC', recordModule: r.clientId? 'CMS':'LMS', recordId: r.clientId || r.leadId,
     leadId: r.leadId || undefined, allocationId:r.id, allocationIds: plans.map(p=>p.id),
     /* WHICH CONSENT THIS IS, NOT MERELY WHICH SHEETS IT CARRIES.
@@ -70932,7 +70952,7 @@ function recordStageFor(link){
   return '';
 }
 async function createDocLink(leadId, type, opts){
-  const token = uid('DOC');
+  const token = linkToken('DOC');
   opts = opts || {};
   // The link carries the form's own name. The server needs it when the
   // answers come back — to tell the record's owner what arrived — and the
@@ -80622,6 +80642,7 @@ async function apiPutSecret(id, body){
     method:'PUT', headers: Object.assign({'Content-Type':'application/json'}, apiHeaders()),
     body: JSON.stringify(body)});
   const r = await res.json();
+  if(!res.ok) throw new Error(r.message || r.error || ('the server refused (' + res.status + ')'));
   apiSecretState[id] = {hasSecret: !!r.hasSecret, hasShareToken: !!r.hasShareToken};
   return r;
 }
@@ -80658,7 +80679,11 @@ async function saveApiConnector(){
   const body = {};
   if(secretEl && secretEl.value) body.secret = secretEl.value;
   if(tokenEl && tokenEl.value) body.shareToken = tokenEl.value;
-  if(Object.keys(body).length){
+  /* The server only lets the stored credential travel to the addresses saved
+     with it, so they are sent every time the connector is saved. */
+  const hasStored = !!(apiSecretState[d.id] && apiSecretState[d.id].hasSecret);
+  if(Object.keys(body).length || hasStored){
+    body.baseUrl = d.baseUrl || ''; body.tokenUrl = (d.auth && d.auth.tokenUrl) || '';
     try{ await apiPutSecret(d.id, body); }
     catch(e){ alert('The credential could not be saved — ' + e.message); return; }
   }
@@ -80688,7 +80713,8 @@ async function apiTestFromEditor(){
   apiEditCapture();
   const d = apiDraft();
   const secretEl = document.getElementById('ac_secret');
-  if(secretEl && secretEl.value){ await apiPutSecret(d.id, {secret: secretEl.value}); secretEl.value = ''; }
+  if(secretEl && secretEl.value){ await apiPutSecret(d.id, {secret: secretEl.value,
+    baseUrl: d.baseUrl || '', tokenUrl: (d.auth && d.auth.tokenUrl) || ''}); secretEl.value = ''; }
   await apiTestRun(d, true);
 }
 async function apiTestConnection(id){

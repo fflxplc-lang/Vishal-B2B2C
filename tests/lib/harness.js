@@ -50,6 +50,10 @@ async function suite(opts, body){
 
   // Console noise that says nothing about this application.
   const IGNORE = /404|ERR_CERT|ERR_NETWORK_CHANGED|fonts\.g(oogleapis|static)|favicon/;
+  /* Web push cannot register in a headless browser ("permission denied",
+     "does not support the Push API in incognito mode"). That is the test
+     browser, not the application. */
+  const IGNORE_PUSH = /Push API|push AbortError|Registration failed - permission denied/;
 
   try {
     if(opts.mail){
@@ -66,11 +70,16 @@ async function suite(opts, body){
       permissions: ['geolocation'],
       geolocation: {latitude: 25.317645, longitude: 82.973915, accuracy: 18}});
 
-    page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));
+    /* A step that throws on purpose (to see the error screen) says so with
+       t.expectConsole, and that covers the page error it raises too. */
+    page.on('pageerror', e => {
+      if(allowConsole.some(re => re.test(e.message))) return;
+      errors.push('PAGEERROR: ' + e.message);
+    });
     page.on('console', m => {
       if(m.type() !== 'error') return;
       const txt = m.text();
-      if(IGNORE.test(txt)) return;
+      if(IGNORE.test(txt) || IGNORE_PUSH.test(txt)) return;
       if(allowConsole.some(re => re.test(txt))) return;
       consoleErrors.push('CONSOLE: ' + txt);
     });

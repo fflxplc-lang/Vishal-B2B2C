@@ -35,4 +35,6 @@ bash run.sh smoke              # one suite
 bash run.sh                    # all suites
 ```
 
-See `CLAUDE.md` for working rules and `DEPLOY.md` for production deployment.
+Production deployment is done by `deploy/boss-finowise/setup.sh` (first install and
+updates) and `deploy/boss-finowise/install-autodeploy.sh` (deploy-branch auto-deploy);
+the comments at the top of each say how to run them.

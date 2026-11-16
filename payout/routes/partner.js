@@ -1,8 +1,8 @@
 // Partner (broking) revenue such as Motilal Oswal (MOFSL) — kept separate from MF trail.
 import { Router } from 'express';
 import multer from 'multer';
-import { db, audit, tx, getSetting, setSetting } from '../db.js';
-import { requireAdmin, scopeIds } from '../auth.js';
+import { db, audit, tx, getSetting, setSetting, fingerprintOf, duplicateBatch, duplicateError } from '../db.js';
+import { requireAdmin, scopeIds, scopeUser, IN_SCOPE } from '../auth.js';
 import { parsePartner } from '../parsers/registrar.js';
 import { parseJSON, upper } from '../util.js';
 
@@ -41,11 +41,15 @@ r.post('/upload', requireAdmin, upload.single('file'), (req, res) => {
   const partner = upper(req.body.partner || 'MOFSL');
   const period = req.body.period;
   if (!/^\d{4}-\d{2}$/.test(period || '')) throw new Error('Pick the statement month');
+  if (!req.file) throw new Error('Choose a file to upload');
   const rows = parsePartner(req.file.buffer, req.file.originalname);
   const total = rows.reduce((s, x) => s + x.total, 0);
+  const fingerprint = fingerprintOf('partner', 'STATEMENT', rows);
+  const dup = duplicateBatch({ kind: 'partner', source: partner, variant: 'STATEMENT', period, fingerprint, rows: rows.length, rawRows: rows.length, total });
+  if (dup) throw duplicateError(dup);
   const batchId = tx(() => {
-    const id = Number(db.prepare(`INSERT INTO batches(file_name, kind, source, variant, period, rows, raw_rows, total, raw_total, created_by)
-      VALUES(?, 'partner', ?, 'STATEMENT', ?, ?, ?, ?, ?, ?)`).run(req.file.originalname, partner, period, rows.length, rows.length, total, total, req.user.id).lastInsertRowid);
+    const id = Number(db.prepare(`INSERT INTO batches(file_name, kind, source, variant, period, rows, raw_rows, total, raw_total, created_by, fingerprint)
+      VALUES(?, 'partner', ?, 'STATEMENT', ?, ?, ?, ?, ?, ?, ?)`).run(req.file.originalname, partner, period, rows.length, rows.length, total, total, req.user.id, fingerprint).lastInsertRowid);
     const ins = db.prepare(`INSERT INTO partner_rows(batch_id, partner, period, code, client_name, segment, total, mentor, partner_share, client_id, map_snapshot) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     for (const x of rows) {
       const cid = db.prepare('SELECT client_id FROM partner_codes WHERE partner = ? AND code = ?').get(partner, x.code)?.client_id ?? null;
@@ -59,12 +63,20 @@ r.post('/upload', requireAdmin, upload.single('file'), (req, res) => {
 
 const live = "JOIN batches t ON t.id = p.batch_id AND t.status = 'live'";
 
+// A non-admin sees only statement rows on clients mapped to someone in their scope: the row's
+// mapping as it was imported (map_snapshot), else the client's current one, as payoutRows uses.
+// Unattached codes are on nobody's mapping, so only an admin sees them.
+const MAPPED_TO_SCOPE = `p.client_id IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(COALESCE(p.map_snapshot,
+  (SELECT c2.hierarchy FROM clients c2 WHERE c2.id = p.client_id), '{}')) j WHERE CAST(j.value AS INTEGER) ${IN_SCOPE})`;
+
 r.get('/', (req, res) => {
   const partner = upper(req.query.partner || 'MOFSL');
   const month = req.query.month || '';
   const ids = scopeIds(req);
-  const where = `p.partner = ? AND (? = '' OR p.period = ?)`;
-  const args = [partner, month, month];
+  const scope = scopeUser(req);
+  const mine = scope ? `AND ${MAPPED_TO_SCOPE}` : '';
+  const where = `p.partner = ? AND (? = '' OR p.period = ?) ${mine}`;
+  const args = scope ? [partner, month, month, scope] : [partner, month, month];
   const rows = db.prepare(`SELECT p.* FROM partner_rows p ${live} WHERE ${where}`).all(...args);
   const per = payoutRows(rows, partner);
   const users = new Map(db.prepare('SELECT id, name, code, level FROM users').all().map((u) => [u.id, u]));
@@ -72,10 +84,10 @@ r.get('/', (req, res) => {
   const sum = (k) => rows.reduce((s, x) => s + (x[k] || 0), 0);
   const months = db.prepare(`SELECT p.period, COUNT(*) rows, COUNT(DISTINCT p.code) codes, SUM(p.total) total, SUM(p.mentor) mentor, SUM(p.partner_share) partner_share,
       COUNT(DISTINCT CASE WHEN p.client_id IS NULL THEN p.code END) unmapped
-    FROM partner_rows p ${live} WHERE p.partner = ? GROUP BY p.period ORDER BY p.period DESC`).all(partner);
+    FROM partner_rows p ${live} WHERE p.partner = ? ${mine} GROUP BY p.period ORDER BY p.period DESC`).all(...(scope ? [partner, scope] : [partner]));
   const segments = db.prepare(`SELECT p.segment, COUNT(*) rows, SUM(p.total) total, SUM(p.mentor) ours FROM partner_rows p ${live}
     WHERE ${where} GROUP BY p.segment ORDER BY total DESC`).all(...args);
-  const unmapped = db.prepare(`SELECT p.code, MAX(p.client_name) client_name, COUNT(*) rows, SUM(p.total) total, SUM(p.mentor) mentor
+  const unmapped = scope ? [] : db.prepare(`SELECT p.code, MAX(p.client_name) client_name, COUNT(*) rows, SUM(p.total) total, SUM(p.mentor) mentor
     FROM partner_rows p ${live} WHERE p.partner = ? AND p.client_id IS NULL GROUP BY p.code ORDER BY total DESC`).all(partner);
   const byClient = db.prepare(`SELECT p.code, COALESCE(c.name, MAX(p.client_name)) name, c.id client_id, SUM(p.total) total, SUM(p.mentor) mentor
     FROM partner_rows p ${live} LEFT JOIN clients c ON c.id = p.client_id WHERE ${where} GROUP BY p.code ORDER BY total DESC LIMIT 500`).all(...args);

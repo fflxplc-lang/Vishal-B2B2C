@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
-# Auto-deployer for boss.finowise.com. Installed to /home/finowise-b2c/deploy.sh
-# by install-autodeploy.sh and run every minute by finowise-b2c-deploy.timer.
+# Auto-deployer for BOSS (Vishal-B2B2C). Installed to /home/vishal-b2b2c/deploy.sh
+# by install-autodeploy.sh and run every minute by vishal-b2b2c-deploy.timer.
 #
 # It watches the `deploy` branch, not `main`: changes land on main, and only
 # moving `deploy` (when the owner says "deploy") puts them live. On a new
 # commit it backs up the data, installs, checks, restarts, and waits for
 # /api/health. If any step fails, the previous commit is put back by itself.
-# The data in /home/finowise-b2c/data is never written here, only copied into
+# The data in /home/vishal-b2b2c/data is never written here, only copied into
 # backups/. What happened is one line in deploy-status.txt, which the app
-# serves at https://boss.finowise.com/deploy-status.txt.
+# serves at https://<your domain>/deploy-status.txt.
 #
 # This copy runs from outside the app folder on purpose: a bad commit must not
 # be able to break the thing that rolls bad commits back.
 set -uo pipefail
 
-U=finowise-b2c
+U=vishal-b2b2c
 HOME_DIR=/home/$U
 APP=$HOME_DIR/app
-SERVICE=finowise-b2c
-BRANCH=deploy
+SERVICE=$U
+# The branch that is live: `deploy`, unless app.env says DEPLOY_BRANCH=...
+BRANCH=$(sed -n 's/^DEPLOY_BRANCH=//p' $HOME_DIR/app.env 2>/dev/null)
+BRANCH=${BRANCH:-deploy}
 STATUS=$HOME_DIR/deploy-status.txt
 BACKUPS=$HOME_DIR/backups
 PORT=$(sed -n 's/^PORT=//p' $HOME_DIR/app.env)
@@ -55,7 +57,7 @@ NEW=$(as_app git -C $APP rev-parse "origin/$BRANCH")
 FAILED=$(cat $HOME_DIR/deploy-failed 2>/dev/null || true)
 # First run, or GitHub readable again after a WAITING line: say what is live.
 if [ ! -s $STATUS ] || grep -q 'WAITING' $STATUS; then
-  if [ -n "$FAILED" ] && [ "$NEW" = "$FAILED" ]; then status "ROLLED BACK to ${CUR:0:7} - ${NEW:0:7} failed (see: journalctl -u finowise-b2c-deploy -n 50)"
+  if [ -n "$FAILED" ] && [ "$NEW" = "$FAILED" ]; then status "ROLLED BACK to ${CUR:0:7} - ${NEW:0:7} failed (see: journalctl -u $SERVICE-deploy -n 50)"
   else status "LIVE ${CUR:0:7}"; fi
 fi
 [ "$NEW" = "$CUR" ] && exit 0
@@ -77,7 +79,7 @@ else
   echo "$NEW" > $HOME_DIR/deploy-failed
   log "${NEW:0:7} failed; putting ${CUR:0:7} back"
   if install_and_start "$CUR"; then
-    status "ROLLED BACK to ${CUR:0:7} - ${NEW:0:7} failed (see: journalctl -u finowise-b2c-deploy -n 50)"
+    status "ROLLED BACK to ${CUR:0:7} - ${NEW:0:7} failed (see: journalctl -u $SERVICE-deploy -n 50)"
   else
     status "CRITICAL: ${NEW:0:7} failed and rolling back to ${CUR:0:7} also failed"
   fi

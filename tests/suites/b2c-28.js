@@ -48,8 +48,14 @@ suite(async t => {
       eval(TEAM);
       const u = me();
       u.parentUserId = 'ZT0';
+      /* Working days only: on a Monday, "ten days on, plus three" lands on a
+         Sunday, which the form refuses as a non-working day before it ever
+         looks for the overlap this step is about. */
       const d = new Date(); d.setDate(d.getDate() + 10);
-      const a = hrDateKey(d); d.setDate(d.getDate() + 3); const b = hrDateKey(d);
+      while(hrOffDayKind(hrDateKey(d))) d.setDate(d.getDate() + 1);
+      const a = hrDateKey(d); d.setDate(d.getDate() + 3);
+      while(hrOffDayKind(hrDateKey(d))) d.setDate(d.getDate() + 1);
+      const b = hrDateKey(d);
       DB.hrLeave = (DB.hrLeave || []).filter(l => l.userId !== u.id).concat([
         {id: 'HRL-ZZA', userId: u.id, from: a, to: b, type: 'Casual Leave', unit: 'full', status: 'Approved', reason: 'ZZ first', approverId: 'ZT0', decidedBy: 'ZT0'}]);
       await save('hrLeave');

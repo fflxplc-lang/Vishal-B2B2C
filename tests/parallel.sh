@@ -113,10 +113,13 @@ cat "$WORK"/report.* 2>/dev/null | sort > "$WORK/report.all"
 ran=0; bad=0
 if [ -f "$WORK/report.all" ]; then
   ran=$(grep -c '^=== ' "$WORK/report.all" 2>/dev/null); ran=${ran:-0}
-  bad=$(grep -c '^FAIL'  "$WORK/report.all" 2>/dev/null); bad=${bad:-0}
+  # A suite failed unless its block says ALL CLEAN. Counting FAIL lines both
+  # counted one suite twice and missed suites that failed on a page error.
+  clean=$(grep -c '^ALL CLEAN' "$WORK/report.all" 2>/dev/null); clean=${clean:-0}
+  bad=$((ran - clean))
 fi
 echo
-grep -B1 '^FAIL' "$WORK/report.all" 2>/dev/null | head -60
+cat "$WORK"/report.[0-9]* 2>/dev/null | awk '/^=== /{name=$0; next} /^ALL CLEAN/{name=""; next} name!=""{print name; print; name=""}' | head -60
 echo "suites : $ran of ${#SUITES[@]}"
 echo "failed : $bad"
 if [ "$ran" -ne "${#SUITES[@]}" ]; then echo "  INCOMPLETE — see $WORK/report.all"; exit 1; fi

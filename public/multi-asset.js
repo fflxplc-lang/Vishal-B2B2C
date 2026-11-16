@@ -1234,11 +1234,18 @@ async function maResetAll(){
   if(typed !== 'DELETE' && typed !== 'RESET') return;
   const ups = (DB.assetUploads || []).slice();
   const nH = (DB.platformHoldings || []).length, nS = (DB.platformSips || []).length;
-  DB.assetUploads = [];
-  await save('assetUploads');
-  for(const u of ups){ delete DB[maRowsKey(u.id)]; await sdel(maRowsKey(u.id)); if(u.hasFile) await sdel(maFileKey(u.id)); }
-  DB.platformHoldings = []; DB.platformSips = [];
-  await save('platformHoldings'); await save('platformSips');
+  /* Emptying these lists is the point, so the saves say so (X-CRM-Bulk).
+     Without it the server's guard against a page that failed to load
+     refuses to empty a list of five or more, the screen shows nothing, and
+     everything comes back on the next reload. */
+  ssetBulkWrite = true;
+  try {
+    DB.assetUploads = [];
+    await save('assetUploads');
+    for(const u of ups){ delete DB[maRowsKey(u.id)]; await sdel(maRowsKey(u.id)); if(u.hasFile) await sdel(maFileKey(u.id)); }
+    DB.platformHoldings = []; DB.platformSips = [];
+    await save('platformHoldings'); await save('platformSips');
+  } finally { ssetBulkWrite = false; }
   const at = new Date().toISOString();
   (DB.importBatches || []).forEach(b=>{ if(!b.removedAt){ b.removedAt = at; b.removedBy = currentUser; } });
   await save('importBatches');

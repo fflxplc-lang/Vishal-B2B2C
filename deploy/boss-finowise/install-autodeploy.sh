@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
-# Turns on auto-deploy for boss.finowise.com. Run once as root, after setup.sh:
-#   bash /home/finowise-b2c/app/deploy/boss-finowise/install-autodeploy.sh
+# Turns on auto-deploy for BOSS (Vishal-B2B2C). Run once as root, after setup.sh:
+#   bash /home/vishal-b2b2c/app/deploy/boss-finowise/install-autodeploy.sh
 #
 # What it does:
 #   1. Gives the app's Linux user a read-only GitHub "deploy key" for this one
 #      repository, so the server can fetch new code by itself. No token is
 #      stored anywhere. You paste the key into GitHub once (it shows how).
-#   2. Copies autodeploy.sh to /home/finowise-b2c/deploy.sh, outside the app
+#   2. Copies autodeploy.sh to /home/vishal-b2b2c/deploy.sh, outside the app
 #      folder, and runs it every minute with a systemd timer.
 # From then on, moving the `deploy` branch on GitHub puts that commit live
 # within a minute, with a data backup first and an automatic rollback if the
-# new code does not start. Status: https://boss.finowise.com/deploy-status.txt
+# new code does not start. Status: https://<your domain>/deploy-status.txt
 # Safe to re-run (for example to pick up a newer autodeploy.sh).
 set -euo pipefail
 
-U=finowise-b2c
+DOMAIN="${DOMAIN:-boss.freedomlifex.co.in}"
+U=vishal-b2b2c
 HOME_DIR=/home/$U
 APP=$HOME_DIR/app
-OWNER_REPO=fflxplc-lang/FINOWISE_BOSS
+SERVICE=$U
+OWNER_REPO=fflxplc-lang/Vishal-B2B2C
 KEY=$HOME_DIR/.ssh/id_ed25519
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
@@ -32,7 +34,7 @@ SRC_SCRIPT=$APP/deploy/boss-finowise/autodeploy.sh
 say "Deploy key for $U"
 mkdir -p $HOME_DIR/.ssh && chmod 700 $HOME_DIR/.ssh && chown $U:$U $HOME_DIR/.ssh
 if [ ! -f $KEY ]; then
-  as_app ssh-keygen -q -t ed25519 -N '' -C "boss.finowise.com auto-deploy" -f $KEY
+  as_app ssh-keygen -q -t ed25519 -N '' -C "$DOMAIN auto-deploy" -f $KEY
   echo "made a new key"
 else
   echo "keeping the existing key"
@@ -47,7 +49,7 @@ if ! can_read; then
   echo
   echo "GitHub does not know this key yet. Add it once:"
   echo "  1. Open https://github.com/$OWNER_REPO/settings/keys/new"
-  echo "  2. Title: boss.finowise.com auto-deploy"
+  echo "  2. Title: $DOMAIN auto-deploy"
   echo "  3. Key: paste the line below"
   echo "  4. Leave \"Allow write access\" UNticked, then click Add key"
   echo
@@ -72,18 +74,18 @@ say "Auto-deploy timer"
 install -m 700 -o root -g root $SRC_SCRIPT $HOME_DIR/deploy.sh
 bash -n $HOME_DIR/deploy.sh
 
-cat > /etc/systemd/system/finowise-b2c-deploy.service <<'EOF'
+cat > /etc/systemd/system/$SERVICE-deploy.service <<EOF
 [Unit]
-Description=Deploy boss.finowise.com from the deploy branch
+Description=Deploy $DOMAIN from the deploy branch
 
 [Service]
 Type=oneshot
-ExecStart=/home/finowise-b2c/deploy.sh
+ExecStart=$HOME_DIR/deploy.sh
 EOF
 
-cat > /etc/systemd/system/finowise-b2c-deploy.timer <<'EOF'
+cat > /etc/systemd/system/$SERVICE-deploy.timer <<EOF
 [Unit]
-Description=Check the deploy branch for boss.finowise.com every minute
+Description=Check the deploy branch for $DOMAIN every minute
 
 [Timer]
 OnBootSec=1min
@@ -94,11 +96,15 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now finowise-b2c-deploy.timer
-systemctl start finowise-b2c-deploy.service || true
+systemctl enable --now $SERVICE-deploy.timer
+systemctl start $SERVICE-deploy.service || true
 
 say "Done"
 echo "Auto-deploy is on. Moving the deploy branch on GitHub puts it live within a minute."
-echo "Status:  cat $HOME_DIR/deploy-status.txt   (also https://boss.finowise.com/deploy-status.txt)"
-echo "History: journalctl -u finowise-b2c-deploy -n 30 --no-pager"
+if ! as_app git -C $APP ls-remote --exit-code --heads origin deploy >/dev/null 2>&1; then
+  echo "NOTE: the repository has no 'deploy' branch yet. Create it from main on GitHub for the"
+  echo "      first deploy, or put DEPLOY_BRANCH=main in $HOME_DIR/app.env to follow main."
+fi
+echo "Status:  cat $HOME_DIR/deploy-status.txt   (also https://$DOMAIN/deploy-status.txt)"
+echo "History: journalctl -u $SERVICE-deploy -n 30 --no-pager"
 echo "Backups: ls $HOME_DIR/backups   (the data, copied before every deploy; the last 20 are kept)"

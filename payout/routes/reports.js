@@ -38,6 +38,11 @@ r.get('/summary', (req, res) => {
 });
 
 const taxFor = (_user, base) => invoiceTax(base);
+// A person's share for one month, from live batches only (a batch in the trash pays nobody).
+const shareOf = db.prepare(`SELECT COALESCE(SUM(l.amount),0) s FROM payout_lines l JOIN brokerage b ON b.id = l.brokerage_id ${LIVE}
+  WHERE l.user_id = ? AND l.period = ?`);
+const PERIOD = /^\d{4}-\d{2}$/;
+const badPeriod = () => Object.assign(new Error('Pick a month (YYYY-MM)'), { status: 400 });
 
 r.get('/monthly', (req, res) => {
   const pf = periodFilter(req.query);
@@ -62,9 +67,14 @@ r.put('/invoice-settings', requireAdmin, (req, res) => {
 // Submit a month for settlement approval (goes to the admin Approvals Queue).
 r.post('/settlements', (req, res) => {
   const uid = targetUser({ ...req, query: req.body });
-  const period = req.body.period;
+  const period = String(req.body.period || '');
+  if (!PERIOD.test(period)) throw badPeriod();
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(uid);
-  const base = db.prepare('SELECT COALESCE(SUM(amount),0) s FROM payout_lines WHERE user_id = ? AND period = ?').get(uid, period).s;
+  if (!user) throw Object.assign(new Error('User not found'), { status: 404 });
+  // Once approved, a month is settled: resubmitting would put it back in the queue with new figures.
+  const was = db.prepare('SELECT status FROM settlements WHERE user_id = ? AND period = ?').get(uid, period);
+  if (was?.status === 'approved') throw Object.assign(new Error(`${periodLabel(period)} is already approved for settlement and can't be resubmitted`), { status: 409 });
+  const base = shareOf.get(uid, period).s;
   if (!base) throw new Error('Nothing to settle for this period');
   const t = taxFor(user, base);
   db.prepare(`INSERT INTO settlements(user_id, period, base, gst, tds, net, status) VALUES(?, ?, ?, ?, ?, ?, 'pending')
@@ -78,9 +88,11 @@ r.post('/settlements', (req, res) => {
 
 r.get('/invoice', (req, res) => {
   const uid = targetUser(req);
-  const period = req.query.period;
+  const period = String(req.query.period || '');
+  if (!PERIOD.test(period)) throw badPeriod();
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(uid);
-  const base = db.prepare('SELECT COALESCE(SUM(amount),0) s FROM payout_lines WHERE user_id = ? AND period = ?').get(uid, period).s;
+  if (!user) throw Object.assign(new Error('User not found'), { status: 404 });
+  const base = shareOf.get(uid, period).s;
   const t = taxFor(user, base);
   const firm = getSetting('firm');
   const addr = parseJSON(user.address, {});
@@ -88,18 +100,18 @@ r.get('/invoice', (req, res) => {
   const sameState = (addr.state || '').toLowerCase() === (firm.state || '').toLowerCase();
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const inr = (n) => `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Invoice ${esc(user.name)} ${period}</title>
+  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Invoice ${esc(user.name)} ${esc(period)}</title>
 <style>body{font-family:Inter,Arial,sans-serif;color:#0f172a;max-width:800px;margin:32px auto;padding:0 24px}
 h1{font-size:22px;margin:0}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #cbd5e1;padding:8px;text-align:left;font-size:13px}
 th{background:#f1f5f9}.r{text-align:right}.grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:20px;font-size:13px}
 .muted{color:#64748b}.sig{margin-top:48px;text-align:right}@media print{button{display:none}}</style></head><body>
 <button onclick="print()" style="float:right;padding:8px 16px">Print / Save PDF</button>
-<h1>TAX INVOICE</h1><div class="muted">Commission for ${periodLabel(period)} · Invoice WF-${uid}-${period.replace('-', '')}</div>
+<h1>TAX INVOICE</h1><div class="muted">Commission for ${esc(periodLabel(period))} · Invoice WF-${esc(uid)}-${esc(period.replace('-', ''))}</div>
 <div class="grid"><div><b>From</b><br>${esc(user.name)}<br>${esc(addr.street || '')}<br>${esc([addr.city, addr.state, addr.pincode].filter(Boolean).join(', '))}<br>
 ${user.gst ? `GSTIN: ${esc(user.gst)}<br>` : ''}${user.pan ? `PAN: ${esc(user.pan)}<br>` : ''}${user.code ? `ARN / Code: ${esc(user.code)}` : ''}</div>
 <div><b>To</b><br>${esc(firm.name)}<br>${esc(firm.address1)}<br>${esc(firm.address2)}<br>GSTIN: ${esc(firm.gstin)}<br>State code: ${esc(firm.stateCode)}</div></div>
 <table><tr><th>Description</th><th>HSN/SAC</th><th class="r">Amount</th></tr>
-<tr><td>Mutual fund distribution commission — ${periodLabel(period)}</td><td>${esc(firm.hsn)}</td><td class="r">${inr(base)}</td></tr>
+<tr><td>Mutual fund distribution commission — ${esc(periodLabel(period))}</td><td>${esc(firm.hsn)}</td><td class="r">${inr(base)}</td></tr>
 ${t.gst ? (sameState
     ? `<tr><td colspan="2">CGST ${t.gstPct / 2}%</td><td class="r">${inr(t.gst / 2)}</td></tr><tr><td colspan="2">SGST ${t.gstPct / 2}%</td><td class="r">${inr(t.gst / 2)}</td></tr>`
     : `<tr><td colspan="2">IGST ${t.gstPct}%</td><td class="r">${inr(t.gst)}</td></tr>`) : ''}
@@ -118,11 +130,13 @@ r.get('/client-wise', (req, res) => {
   const rows = db.prepare(`
     SELECT COALESCE(c.name, MAX(b.investor), 'unknown') name, COALESCE(c.pan, MAX(b.pan)) pan, c.id client_id,
       COUNT(*) txs, SUM(b.amount) gross,
-      (SELECT SUM(b2.aum) FROM brokerage b2 WHERE b2.client_id = c.id AND b2.period = ?) aum,
+      (SELECT SUM(b2.aum) FROM brokerage b2 JOIN batches t2 ON t2.id = b2.batch_id AND t2.status = 'live'
+         WHERE b2.client_id = c.id AND b2.period = ?) aum,
       (SELECT COALESCE(SUM(l.amount),0) FROM payout_lines l JOIN brokerage b3 ON b3.id = l.brokerage_id
-         WHERE l.user_id = ? AND b3.client_id = c.id) myShare
+         JOIN batches t3 ON t3.id = b3.batch_id AND t3.status = 'live'
+         WHERE l.user_id = ? AND b3.client_id = c.id AND ${pf.sql.replace(/\bb\.period\b/g, 'b3.period')}) myShare
     FROM brokerage b ${LIVE} LEFT JOIN clients c ON c.id = b.client_id
-    WHERE ${pf.sql} ${mine} GROUP BY COALESCE(c.id, 'f' || b.folio) ORDER BY gross DESC`).all(latest, me, ...pf.args, ...(uid ? [uid] : []));
+    WHERE ${pf.sql} ${mine} GROUP BY COALESCE(c.id, 'f' || b.folio) ORDER BY gross DESC`).all(latest, me, ...pf.args, ...pf.args, ...(uid ? [uid] : []));
   res.json({ rows, aumPeriod: latest });
 });
 
@@ -180,8 +194,10 @@ r.get('/growth', (req, res) => {
         SELECT b.folio, b.aum, ROW_NUMBER() OVER (PARTITION BY b.folio ORDER BY b.period DESC, b.id DESC) rn
         FROM brokerage b ${LIVE} WHERE b.period <= ? ${scope}) x WHERE x.rn = 1`).get(...(userId ? [range[1], userId] : [range[1]])).s;
     const share = userId
-      ? db.prepare(`SELECT COALESCE(SUM(l.amount),0) s FROM payout_lines l WHERE l.period BETWEEN ? AND ? AND l.user_id ${IN_SCOPE}`).get(...range, userId).s
-      : db.prepare(`SELECT COALESCE(SUM(l.amount),0) s FROM payout_lines l WHERE l.period BETWEEN ? AND ? AND l.user_id IS NOT NULL`).get(...range).s;
+      ? db.prepare(`SELECT COALESCE(SUM(l.amount),0) s FROM payout_lines l JOIN brokerage b ON b.id = l.brokerage_id ${LIVE}
+          WHERE l.period BETWEEN ? AND ? AND l.user_id ${IN_SCOPE}`).get(...range, userId).s
+      : db.prepare(`SELECT COALESCE(SUM(l.amount),0) s FROM payout_lines l JOIN brokerage b ON b.id = l.brokerage_id ${LIVE}
+          WHERE l.period BETWEEN ? AND ? AND l.user_id IS NOT NULL`).get(...range).s;
     return { avgAum: avg, snapAum: snap, share };
   };
 

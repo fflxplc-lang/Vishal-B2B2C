@@ -73,6 +73,9 @@ const FILL = `function(token){
 }`;
 
 suite(async t => {
+  /* A PIN code typed into the form is looked up; this suite runs no lookup
+     service, so the server answers 502, which the form handles. */
+  t.expectConsole(/502/);
   await t.home();
   let token = '';
 

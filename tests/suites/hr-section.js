@@ -359,9 +359,16 @@ suite({mail: true}, async t => {
       const options = Array.from(document.querySelectorAll('#f_hrReqType option')).map(o=>o.textContent.trim());
       document.getElementById('f_hrReqType').value = 'Sick Leave';
       document.getElementById('f_hrReqDuration').value = 'Half Day (First Half)';
-      document.getElementById('f_hrReqFrom').value = '2026-12-01';
-      document.getElementById('f_hrReqTo').value = '2026-12-01';
+      /* A working day well clear of the leave the earlier steps booked
+         (those are dated from today, so a fixed date collides with them on
+         some days of the year). */
+      const hd = new Date(); hd.setDate(hd.getDate() + 60);
+      while(hrOffDayKind(hrDateKey(hd))) hd.setDate(hd.getDate() + 1);
+      document.getElementById('f_hrReqFrom').value = hrDateKey(hd);
+      document.getElementById('f_hrReqTo').value = hrDateKey(hd);
       document.getElementById('f_hrReqReason').value = 'ZZ half day for a hospital visit';
+      // Leave Category is a required choice on the form now.
+      document.getElementById('f_hrReqCategory').value = 'Paid';
       ['f_hrReqDuration','f_hrReqDelegated'].forEach(id => { const el = document.getElementById(id); if(el && !el.value) el.value = id === 'f_hrReqDuration' ? 'Full Day' : 'No'; });
       hrLeaveBalanceNote();
       out.note = (document.getElementById('hrBalNote') || {}).textContent || '';

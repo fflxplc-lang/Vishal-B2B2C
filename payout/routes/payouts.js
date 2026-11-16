@@ -38,12 +38,19 @@ function ledger(period, product) {
   const paid = (cmp) => new Map(db.prepare(`SELECT user_id, SUM(amount) s FROM payments WHERE period ${cmp} ? GROUP BY user_id`).all(period).map((x) => [x.user_id, x.s]));
   const paidNow = paid('='), paidBefore = paid('<');
   const approved = new Set(db.prepare("SELECT user_id FROM settlements WHERE period = ? AND status = 'approved'").all(period).map((x) => x.user_id));
+  // Earlier months that were approved for settlement are owed at the net stored on approval
+  // (the taxes as they were then); only what was earned beyond that is taxed at today's rates.
+  // Settlements cover mutual fund payouts, so a partner-only ledger leaves them out.
+  const settledBefore = useMf ? new Map(db.prepare(`SELECT user_id, SUM(base) base, SUM(net) net FROM settlements
+    WHERE period < ? AND status = 'approved' GROUP BY user_id`).all(period).map((x) => [x.user_id, x])) : new Map();
   const tax = (_u, base) => { const t = invoiceTax(base); return { ...t, payable: t.net }; };
   return users.map((u) => {
     const earned = (earnedNow.get(u.id) || 0) + (pNow.get(u.id) || 0);
     const before = (earnedBefore.get(u.id) || 0) + (pBefore.get(u.id) || 0);
     const t = tax(u, earned);
-    const brought = round2(tax(u, before).payable - (paidBefore.get(u.id) || 0));
+    const s = settledBefore.get(u.id);
+    const owedBefore = s ? s.net + (Math.abs(before - s.base) > 0.005 ? tax(u, before - s.base).payable : 0) : tax(u, before).payable;
+    const brought = round2(owedBefore - (paidBefore.get(u.id) || 0));
     const p = paidNow.get(u.id) || 0;
     return {
       id: u.id, name: u.name, code: u.code, level: u.level, broughtFwd: brought, earned: round2(earned),
@@ -60,10 +67,11 @@ r.get('/', (req, res) => {
   if (ids) rows = rows.filter((x) => ids.includes(x.id));
   const sum = (k) => round2(rows.reduce((s, x) => s + x[k], 0));
 
-  // Attribution health — money that may be reaching the wrong person.
-  const noRM = db.prepare(`SELECT c.id, c.name, SUM(b.amount) gross FROM clients c JOIN brokerage b ON b.client_id = c.id ${LIVE}
+  // Attribution health — money that may be reaching the wrong person. Firm-wide, so admins only:
+  // anyone else gets the same shape, empty.
+  const noRM = ids ? [] : db.prepare(`SELECT c.id, c.name, SUM(b.amount) gross FROM clients c JOIN brokerage b ON b.client_id = c.id ${LIVE}
     WHERE b.period = ? AND (c.hierarchy IS NULL OR c.hierarchy = '{}') GROUP BY c.id`).all(period);
-  const shared = db.prepare(`SELECT f.folio, GROUP_CONCAT(c.name, ' | ') clients,
+  const shared = ids ? [] : db.prepare(`SELECT f.folio, GROUP_CONCAT(c.name, ' | ') clients,
       (SELECT COALESCE(SUM(b.amount),0) FROM brokerage b ${LIVE} WHERE b.folio = f.folio AND b.period = ?) gross
     FROM folios f JOIN clients c ON c.id = f.client_id GROUP BY f.folio HAVING COUNT(*) > 1`).all(period);
   const periods = db.prepare(`SELECT DISTINCT b.period FROM brokerage b ${LIVE} UNION SELECT DISTINCT period FROM partner_rows ORDER BY 1 DESC`).all().map((x) => x.period);
@@ -80,7 +88,7 @@ r.get('/', (req, res) => {
 
 r.post('/payments', requireAdmin, (req, res) => {
   const { userId, period, amount, paidOn, reference } = req.body;
-  if (!userId || !period || !(Number(amount) > 0)) throw new Error('Person, month and a positive amount are required');
+  if (!userId || !/^\d{4}-\d{2}$/.test(period || '') || !(Number(amount) > 0)) throw new Error('Person, month and a positive amount are required');
   db.prepare('INSERT INTO payments(user_id, period, amount, paid_on, reference) VALUES(?, ?, ?, ?, ?)')
     .run(Number(userId), period, Number(amount), paidOn || new Date().toISOString().slice(0, 10), reference || null);
   const u = db.prepare('SELECT name FROM users WHERE id = ?').get(userId);
@@ -98,6 +106,8 @@ r.get('/payments', (req, res) => {
 // Columns: Name or ARN code, Amount, Date, Reference (month comes from the form).
 r.post('/payments/import', requireAdmin, upload.single('file'), (req, res) => {
   const period = req.body.period;
+  if (!/^\d{4}-\d{2}$/.test(period || '')) throw new Error('Pick the month these payments are for');
+  if (!req.file) throw new Error('Choose a file to upload');
   const t = parseTable(req.file.buffer, req.file.originalname);
   const users = db.prepare('SELECT id, name, code FROM users').all();
   const out = { recorded: 0, skipped: [] };

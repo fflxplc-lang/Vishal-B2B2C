@@ -2,10 +2,12 @@
 // the session, and hands over its account. That account is matched to a payout
 // user by email. A CRM admin is a payout admin, and gets a payout user created
 // the first time they open the module; anyone else has to be added to the team
-// (Clients & Map → Hierarchy) before they see anything.
+// (Clients & Map → Hierarchy) before they see anything. An admin role that was
+// only handed out because the person was a CRM admin (users.auto_admin) lasts as
+// long as they stay one; an admin role set on purpose in Hierarchy is kept.
 import { db, audit } from './db.js';
 
-const findByEmail = db.prepare('SELECT id, name, email, code, role, level, active FROM users WHERE lower(email) = lower(?)');
+const findByEmail = db.prepare('SELECT id, name, email, code, role, level, active, auto_admin FROM users WHERE lower(email) = lower(?)');
 
 function nameFromEmail(email) {
   return String(email).split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) || email;
@@ -18,10 +20,16 @@ export function bindUser(currentAccount) {
     const crmAdmin = account.role === 'admin';
     let user = findByEmail.get(account.email);
     if (!user && crmAdmin) {
-      db.prepare(`INSERT INTO users(name, email, role, level) VALUES(?, ?, 'admin', 7)`)
+      db.prepare(`INSERT INTO users(name, email, role, level, auto_admin) VALUES(?, ?, 'admin', 7, 1)`)
         .run(account.name || nameFromEmail(account.email), String(account.email).toLowerCase());
       user = findByEmail.get(account.email);
       audit(user, 'USER_CREATE', `${user.name} added as a payout admin on first visit`);
+    }
+    if (user && !crmAdmin && user.role === 'admin' && user.auto_admin) {
+      // Admin only because they were a CRM admin, and they no longer are.
+      db.prepare("UPDATE users SET role = 'ops', auto_admin = 0 WHERE id = ?").run(user.id);
+      audit(user, 'USER_UPDATE', `${user.name} is no longer a CRM admin: payout admin rights removed`);
+      user = findByEmail.get(account.email);
     }
     if (!user) {
       return res.status(403).json({ error: 'You are not in the payout team yet. Ask an admin to add your email under Payout → Clients & Map → Hierarchy.', code: 'NOT_IN_TEAM' });

@@ -228,11 +228,20 @@ function install(deps) {
         accepted: ag.acceptedAt ? { types: ag.types || [], method: ag.evidence === 'Signed copy uploaded' ? 'upload' : 'online', signedName: ag.signedName || '' } : null },
       submittedAt: r.empFormSubmittedAt || '' });
   });
+  const uploadHits = new Map();
   app.post('/api/public/pob-form/upload', (req, res) => {
     res.set('Cache-Control', 'no-store');
     const r = recordByFormToken(String(req.query.token || ''));
     if (!r) return res.status(404).json({ ok: false, message: 'This link is not valid any more.' });
     if (stageOf(r) !== 'empanelment') return res.status(400).json({ ok: false, message: 'This form is not open for changes now.' });
+    /* One application needs a handful of documents, re-uploaded a few times
+       at most. A link that keeps uploading is stopped before it fills the
+       disk. */
+    const now = Date.now();
+    const hits = (uploadHits.get(r.id) || []).filter((t) => now - t < 24 * 60 * 60 * 1000);
+    if (hits.length >= 60) return res.status(429).json({ ok: false, message: 'Too many uploads from this link today. Ask your RM if you need to send more.' });
+    hits.push(now); uploadHits.set(r.id, hits);
+    if (uploadHits.size > 5000) uploadHits.clear();
     const f = takeFile(req.body || {}, { pobId: r.id, via: 'empanelment' });
     if (f.error) return res.status(400).json({ ok: false, message: f.error });
     res.json({ ok: true, id: f.id, name: f.name, size: f.size, mime: f.mime });

@@ -168,6 +168,10 @@ suite(async t => {
   });
 
   await t.step('a reporting line that loops hides nobody', async () => {
+    /* Replacing the whole team with three new people is refused by the
+       server's team guard (409), as it should be; this step only checks how
+       the page orders a ring. */
+    t.expectConsole(/409/);
     const r = await t.eval(async (be)=>{
       DB.team = [
         {id:'R1', name:'ZZ Ring One', role:'Manager', parentUserId:'R3', status:'Active', email:'r1@example.in',

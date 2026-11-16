@@ -19,4 +19,4 @@ Built from three copies that split from the same commit (Development `c4a8655`, 
     npm ci
     node server.js        # http://localhost:3000
 
-The payout module needs `multer`, `pdf-parse` and `xlsx` (already in package.json). Browser tests: `cd tests && npm ci && bash parallel.sh` (all 205 suites pass).
+The payout module needs `multer`, `pdf-parse` and `xlsx` (already in package.json). Browser tests: `cd tests && npm ci && bash parallel.sh` (204 suites).

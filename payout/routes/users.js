@@ -74,7 +74,7 @@ r.put('/:id', (req, res) => {
   if (req.user.role !== 'admin') {
     // Non-admins may edit their own profile, bank and address only.
     f = { name: f.name, bank: f.bank, address: f.address, gst: f.gst, pan: f.pan, arn: f.arn, arn_valid: f.arn_valid, euin: f.euin, euin_valid: f.euin_valid };
-  }
+  } else if (f.role !== cur.role) f.auto_admin = 0; // a role chosen here is deliberate, not the CRM-admin default
   if (f.parent_id === id) throw new Error('A user cannot report to themselves');
   if (req.body.signature !== undefined) f.signature = req.body.signature;
   db.prepare(`UPDATE users SET ${Object.keys(f).map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...Object.values(f), id);
@@ -86,9 +86,25 @@ r.put('/:id', (req, res) => {
   res.json({ ...publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id)), recalculated: calc?.recalculated, clientsUpdated: clientIds.length });
 });
 
+// Per-person overrides: {level: pct}, levels 1-7, each a percentage of the brokerage from 0 to 100.
+function cleanSplit(input) {
+  if (input === null || input === undefined || input === '') return null;
+  if (typeof input !== 'object' || Array.isArray(input)) throw new Error('Custom sharing must be a list of level percentages');
+  const out = {};
+  for (const [k, v] of Object.entries(input)) {
+    if (v === null || v === undefined || v === '') continue; // blank: use the default for that level
+    const lvl = Number(k);
+    if (!Number.isInteger(lvl) || lvl < 1 || lvl > 7) throw new Error(`Unknown level "${k}"`);
+    const n = typeof v === 'string' && v.trim() === '' ? NaN : Number(v);
+    if (!Number.isFinite(n) || n < 0 || n > 100) throw new Error(`L${lvl}: the percentage must be a number between 0 and 100`);
+    out[lvl] = n;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 r.put('/:id/sharing', requireAdmin, (req, res) => {
-  const split = req.body.custom_split;
-  db.prepare('UPDATE users SET custom_split = ? WHERE id = ?').run(split && Object.keys(split).length ? JSON.stringify(split) : null, req.params.id);
+  const split = cleanSplit(req.body.custom_split);
+  db.prepare('UPDATE users SET custom_split = ? WHERE id = ?').run(split ? JSON.stringify(split) : null, req.params.id);
   const u = db.prepare('SELECT name FROM users WHERE id = ?').get(req.params.id);
   audit(req.user, 'USER_SHARING', `Custom sharing ${split ? 'set' : 'cleared'} for ${u?.name}`);
   const calc = req.body.recalculate ? recalculate() : null;

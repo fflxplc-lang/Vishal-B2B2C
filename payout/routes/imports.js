@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { db, tx, audit, notify } from '../db.js';
+import { db, tx, audit, notify, fingerprintOf, duplicateBatch, duplicateError } from '../db.js';
 import { requireAdmin } from '../auth.js';
 import { parseTransactions, parseFolioMaster, parseBrokerage } from '../parsers/registrar.js';
 import { resolveClient, standardName, remapUnmapped } from '../services/mapping.js';
@@ -44,6 +44,10 @@ r.post('/upload', requireAdmin, upload.single('file'), (req, res) => {
   const valueOf = (x) => (kind === 'brokerage' ? x.amount : kind === 'transactions' ? x.amount : 0);
   const rawTotal = parsed.reduce((s, x) => s + valueOf(x), 0);
   const total = rows.reduce((s, x) => s + valueOf(x), 0);
+  // The same statement twice would pay everybody twice: refuse it while the first is live.
+  const fingerprint = fingerprintOf(kind, variant, rows);
+  const dup = duplicateBatch({ kind, source: src, variant, period, fingerprint, rows: rows.length, rawRows: parsed.length, total });
+  if (dup) throw duplicateError(dup);
 
   let newClients = 0, unmapped = 0;
   const before = db.prepare('SELECT COUNT(*) c FROM clients').get().c;
@@ -59,8 +63,8 @@ r.post('/upload', requireAdmin, upload.single('file'), (req, res) => {
   };
 
   const batchId = tx(() => {
-    const id = Number(db.prepare(`INSERT INTO batches(file_name, kind, source, variant, period, rows, raw_rows, total, raw_total, created_by)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(name, kind, src, variant, period, rows.length, parsed.length, total, rawTotal, req.user.id).lastInsertRowid);
+    const id = Number(db.prepare(`INSERT INTO batches(file_name, kind, source, variant, period, rows, raw_rows, total, raw_total, created_by, fingerprint)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(name, kind, src, variant, period, rows.length, parsed.length, total, rawTotal, req.user.id, fingerprint).lastInsertRowid);
 
     if (kind === 'transactions') {
       const ins = db.prepare(`INSERT INTO transactions(batch_id, folio, investor, pan, amc, scheme, trxn_date, trxn_type, amount, units, nav, client_id)
@@ -111,7 +115,9 @@ r.post('/upload', requireAdmin, upload.single('file'), (req, res) => {
   });
 });
 
-r.get('/batches', (req, res) => {
+// Batches and their rows carry every investor's PAN, email and mobile: admins only (Data Import
+// is an admin screen).
+r.get('/batches', requireAdmin, (req, res) => {
   const status = req.query.status === 'deleted' ? 'deleted' : 'live';
   const q = `%${req.query.q || ''}%`;
   const month = req.query.month || '';
@@ -122,7 +128,7 @@ r.get('/batches', (req, res) => {
   res.json({ rows, periods, trash: counts.find((c) => c.status === 'deleted')?.c || 0, live: counts.find((c) => c.status === 'live')?.c || 0 });
 });
 
-r.get('/batches/:id/rows', (req, res) => {
+r.get('/batches/:id/rows', requireAdmin, (req, res) => {
   const b = db.prepare('SELECT * FROM batches WHERE id = ?').get(req.params.id);
   if (!b) throw new Error('Batch not found');
   const table = b.kind === 'brokerage' ? 'brokerage' : b.kind === 'transactions' ? 'transactions' : 'folio_master';
