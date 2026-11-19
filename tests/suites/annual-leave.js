@@ -64,6 +64,17 @@ suite(async t => {
     return ids.me + ', reports to the admin; next Monday ' + ids.mon;
   });
   const plus = (d, n) => { const x = new Date(d + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+  /* Nine working days four weeks out — unless that span crosses the new
+     year, when each year's balance would cover its own part. Then three
+     weeks of the next January, more than a whole year's allowance. */
+  const overBalance = () => {
+    const from = plus(ids.mon, 28), to = plus(ids.mon, 38);
+    if(from.slice(0, 4) === to.slice(0, 4)) return {from, to};
+    const y = Number(from.slice(0, 4)) + 1;
+    let mon = y + '-01-11';
+    while(new Date(mon + 'T00:00:00Z').getUTCDay() !== 1) mon = plus(mon, 1);
+    return {from: mon, to: plus(mon, 20)};
+  };
 
   t.section('configuration');
 
@@ -148,7 +159,7 @@ suite(async t => {
       const before = DB.hrLeave.length;
       const x = await zzApply({who: o.me, from: o.from, to: o.to, cat: 'Paid'});   // 9 working days
       return {wrote: DB.hrLeave.length - before, id: x.id};
-    }, Object.assign({}, ids, {from: plus(ids.mon, 28), to: plus(ids.mon, 38)}));
+    }, Object.assign({}, ids, overBalance()));
     const said = t.dialogs.filter(d=>/Paid Leave for/.test(d)).pop() || '';
     if(r.wrote || r.id) throw new Error('it was filed');
     if(!/Unpaid/.test(said)) throw new Error('no refusal naming Unpaid: ' + said);

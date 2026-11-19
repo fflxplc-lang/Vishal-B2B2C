@@ -7,7 +7,11 @@ imports and exports, mail templates and SMTP connectors, public client forms
 hierarchy.
 
 One Express server (`server.js`) serves the app (`public/index.html`) and a
-small JSON-file API. Accounts live in SQLite via Node's built-in `node:sqlite`,
+small JSON-file API.
+It serves two platforms from the same backend and store — the Partner Platform
+(partner.freedomlifex.co.in) and the Company Platform (one.freedomlifex.co.in) —
+with L1–L7 partner levels and employee scopes enforced on the server; see
+`PLATFORMS.md`. Accounts live in SQLite via Node's built-in `node:sqlite`,
 so there are no native dependencies.
 
 ## Run it locally

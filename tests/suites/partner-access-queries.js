@@ -1,6 +1,7 @@
 /* PARTNER ACCESS, QUERIES AND DASHBOARDS. PMS and Onboarding swap names
-   and nothing else; every level (L1–L6) raises and follows queries in PQS,
-   L1 its own, L3 up its team's too; a query goes by its category to the
+   and nothing else; every level follows queries in PQS, and from L2 up
+   (company Ops support) raises them — L1 has no company Ops support — its
+   own, L3 up its team's too; a query goes by its category to the
    department responsible (Technical to the IT Admin), who maps it to an
    associate, who writes the solution; L4–L6 open PPS, Onboarding and PMS
    for their own team only; and the dashboard says whose numbers it shows,
@@ -28,7 +29,7 @@ suite(async t => {
     return 'rail: pms → ' + r.short[0] + ', pob → ' + r.short[1];
   });
 
-  await t.step('a team of partners: Leo L4 › Sam L3 › Nina L1, and Ola L1 elsewhere; IT has an admin and an associate', async () => {
+  await t.step('a team of partners: Leo L4 › Sam L3 › Nina L2, and Ola L1 elsewhere; IT has an admin and an associate', async () => {
     ids = await t.eval(async () => {
       window.alert = () => {};
       const now = new Date().toISOString();
@@ -48,21 +49,22 @@ suite(async t => {
       };
       const leo = await mk('Leo', 'leo.p@example.com', 'L4', currentUser);
       const sam = await mk('Sam', 'sam.p@example.com', 'L3', leo.member);
-      const nina = await mk('Nina', 'nina.p@example.com', 'L1', sam.member);
+      const nina = await mk('Nina', 'nina.p@example.com', 'L2', sam.member);
       const ola = await mk('Ola', 'ola.p@example.com', 'L1', currentUser);
       return {leo, sam, nina, ola, admin: currentUser};
     });
     return 'four partner logins and two IT people';
   });
 
-  await t.step('every level opens PQS and raises a query; only L4 up opens PPS, Onboarding and PMS', async () => {
+  await t.step('every level opens PQS; L2 up raises a query, L1 (no Ops support) cannot; only L4 up opens PPS, Onboarding and PMS', async () => {
     const lv = async m => as(m, () => ({pqs: pageOpenToMe('pqs'), raise: can('PQS','create'), pps: pageOpenToMe('pps'), pms: pageOpenToMe('pms'),
       pob: pageOpenToMe('pob'), ppo: pageOpenToMe('ppo')}));
-    const nina = await lv(ids.nina.member), sam = await lv(ids.sam.member), leo = await lv(ids.leo.member);
-    if(!nina.pqs || !nina.raise || nina.pps || nina.pms || nina.pob) throw new Error('L1 ' + JSON.stringify(nina));
+    const nina = await lv(ids.nina.member), sam = await lv(ids.sam.member), leo = await lv(ids.leo.member), ola = await lv(ids.ola.member);
+    if(!nina.pqs || !nina.raise || nina.pps || nina.pms || nina.pob) throw new Error('L2 ' + JSON.stringify(nina));
+    if(!ola.pqs || ola.raise || ola.pps) throw new Error('L1 ' + JSON.stringify(ola));
     if(!sam.pqs || sam.pps || sam.pob) throw new Error('L3 ' + JSON.stringify(sam));
     if(!leo.pqs || !leo.pps || !leo.pms || !leo.pob || leo.ppo) throw new Error('L4 ' + JSON.stringify(leo));
-    return 'L1 and L3: PQS only; L4: PQS, PPS, Onboarding and PMS (not payouts)';
+    return 'L1: follows PQS but cannot raise; L2 and L3: PQS; L4: PQS, PPS, Onboarding and PMS (not payouts)';
   });
 
   await t.step('Nina raises a Technical query: it goes to the IT Admin, who is told', async () => {

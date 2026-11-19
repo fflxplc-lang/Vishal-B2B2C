@@ -402,6 +402,8 @@ html.dark .appr-blue{--c:#7FB0F5} html.dark .appr-muted{--c:var(--info)}
 .brand-logo{display:block;width:auto;height:auto;max-width:194px;max-height:70px;object-fit:contain}
 .brand-mark{font-family:Georgia,serif;font-size:24px;letter-spacing:.3px;text-align:center;line-height:1.15}
 .brand-mark b{color:var(--gold-light)}
+.platform-tag{margin:6px auto 0;text-align:center;font-size:10px;font-weight:700;letter-spacing:1.3px;text-transform:uppercase;color:var(--gold-light);opacity:.9}
+.sidebar.collapsed .platform-tag{display:none}
 /* A wordmark drawn in the firm's own dark ink disappears on a dark
    sidebar — half the logo simply is not there. Dark mode gives it back
    the white it was drawn against, as a plate that hugs the logo rather
@@ -3313,9 +3315,19 @@ let ssetFormHeader = '';
 /* Set around a background write that nobody is waiting on: a refusal is
    logged, not put in front of somebody who did nothing. */
 let ssetQuiet = false;
+/* A store a partner's page may not save (company configuration, connectors,
+   logs): the server would refuse it (access.js), so it is not sent. Upkeep
+   that tidies such a store in memory runs in every page; the company's
+   sessions are the ones that save it. */
+function bossMayWrite(key){
+  const a = bossAccess();
+  if(!a || !Array.isArray(a.writable)) return true;
+  return a.writable.indexOf(key) >= 0 || (a.writablePrefixes || []).some(p=>String(key).indexOf(p) === 0);
+}
 async function sset(key, value, shared){
   liveWriteUntil = Date.now() + 1200;   // see liveBusy(): a tab mid-write is not interrupted
   if(inPublicMode() && shared!==false) return publicSave(key, value);
+  if(shared!==false && !bossMayWrite(key)) return;
   if(shared===false){
     try{ localStorage.setItem('crm_local_'+key, JSON.stringify(value)); }catch(e){ console.error('local storage set failed', e); }
     return;
@@ -6844,7 +6856,12 @@ function roleReferences(){
   return out;
 }
 function roleOf(user){ return (user && user.role) || defaultRole(); }
-function isAdmin(user){ return roleOf(user || me())===ADMIN_ROLE; }
+function isAdmin(user){
+  const u = user || me();
+  // A partner on L7 (Super Admin) has complete access, as the company's admins do.
+  if(u && u.partnerPobId && u.partnerLevel === 'L7') return true;
+  return roleOf(u)===ADMIN_ROLE;
+}
 
 /* Person-to-person reporting chain. Every team member's parentUserId is set to
    whoever created them; it is what lets the 'team' visibility scope cover a whole
@@ -32814,6 +32831,9 @@ async function submitClientReply(token, id){
    true of somebody who cannot reach the Users page. */
 function memberWantsAdminAccount(m){
   if(!m) return false;
+  // A partner below L7, or a partner's staff, never holds a company admin account.
+  if(m.partnerTeamOf && !m.partnerPobId) return false;
+  if(m.partnerPobId) return m.partnerLevel === 'L7';
   return m.role===ADMIN_ROLE || !!(m.adminFlags && (m.adminFlags.manageUsers || m.adminFlags.managePermissions));
 }
 async function accountsApi(path, opts){
@@ -32884,7 +32904,9 @@ async function sendMemberCredentials(member, password){
    saving is told back is one line, because this is meant to be automatic. */
 async function provisionMemberAccount(member, opts){
   opts = opts || {};
-  if(!window.CRM_IS_ADMIN) return {ok:false, skipped:'not-admin'};
+  // An admin makes every account; an L5+ partner makes their own team's.
+  const ownTeam = plvMayBuildTeam() && member.partnerTeamOf === currentUser;
+  if(!window.CRM_IS_ADMIN && !ownTeam) return {ok:false, skipped:'not-admin'};
   if(!member.email) return {ok:false, skipped:'no-email'};
   const r = await syncMemberAccount(member);
   if(!r.ok) return r;
@@ -36286,15 +36308,34 @@ function applySidebarStyle(style){
    Company Settings, take its place wherever they exist — this is only
    what stands there until they do. */
 const PRODUCT_NAME = 'BOSS';
+/* TWO PLATFORMS, ONE BACKEND (access.js on the server).
+
+   partner.freedomlifex.co.in is the Partner Platform, one.freedomlifex.co.in
+   the Company Platform. Both are this same page over the same store; the
+   server says which one this is (BOSS_PLATFORM) and how it treats the person
+   signed in (BOSS_ACCESS: partner level, staff role, employee scope). The
+   records a page receives are already cut to that person's reach. */
+const BOSS_PLATFORM_NAMES = {partner: 'Partner Platform', company: 'Company Platform'};
+function bossPlatform(){ return window.BOSS_PLATFORM || 'combined'; }
+function bossAccess(){ return window.BOSS_ACCESS || null; }
+/* A partner or a partner's staff whose records the server has cut down. */
+/* Anybody whose records the server cuts down: partners, their staff, and
+   employees with Own / Team / Branch scope. */
+function bossRestricted(){ const a = bossAccess(); return !!(a && !a.unrestricted); }
+function bossPartnerSide(){
+  const a = bossAccess();
+  return !!(a && !a.unrestricted && (a.kind === 'partner' || a.kind === 'staff'));
+}
 function brandMarkHtml(){
   const c = DB.config.company || {};
   const logo = c.logoDataUrl || c.logoUrl;
   const nameParts = (c.name || PRODUCT_NAME).split(' ');
   const last = nameParts.pop();
   const rest = nameParts.join(' ');
-  return logo
+  const tag = BOSS_PLATFORM_NAMES[bossPlatform()] ? `<div class="platform-tag">${esc(BOSS_PLATFORM_NAMES[bossPlatform()])}</div>` : '';
+  return (logo
     ? `<img class="brand-logo" src="${esc(logo)}" alt="${esc(c.name || PRODUCT_NAME)}">`
-    : `<div class="brand-mark">${rest? esc(rest) + ' ' : ''}<b>${esc(last || PRODUCT_NAME)}</b></div>`;
+    : `<div class="brand-mark">${rest? esc(rest) + ' ' : ''}<b>${esc(last || PRODUCT_NAME)}</b></div>`) + tag;
 }
 /* The tab says where you are, not only what the product is — a person
    with BOSS open in three tabs can tell them apart. The firm asked for
@@ -36306,7 +36347,8 @@ function brandMarkHtml(){
    something in a box is a title that is sometimes just "BOSS". */
 function setTabTitle(where){
   const page = String(where === undefined || where === null ? '' : where).trim();
-  document.title = page && page !== PRODUCT_NAME ? PRODUCT_NAME + ' - ' + page : PRODUCT_NAME;
+  const product = bossPlatform() === 'partner' ? PRODUCT_NAME + ' Partner' : bossPlatform() === 'company' ? PRODUCT_NAME + ' One' : PRODUCT_NAME;
+  document.title = page && page !== PRODUCT_NAME ? product + ' - ' + page : product;
 }
 /* THE FIRM'S OWN LOGO, IN THE TAB.
 
@@ -36447,6 +36489,10 @@ async function seedIfEmpty(){
      Admin's name. The first member stays the stand-in only for an admin
      account that has no team member of its own. */
   if(!bindSignedInMember() && !currentUser) currentUser = DB.team[0].id;
+  /* A partner's page holds colleagues as a name only (access.js), so it has
+     nothing to heal and no business repairing the firm's records: the
+     company's sessions do the upkeep below. */
+  if(bossPartnerSide()) return;
   // An account saved before roles existed (or whose role was removed) still needs one. Someone
   // who already held every admin capability was an administrator in all but name, so they become
   // Admin; everyone else gets the default role and keeps exactly the permissions they had. The
@@ -36482,6 +36528,9 @@ async function seedIfEmpty(){
   // A system that was reset is meant to be empty: nobody wants Karan Vora back
   // the morning they cleared the decks to go live.
   if(DB.systemState && DB.systemState.resetAt) return;
+  /* An empty list in a partner's page, or a restricted employee's, means
+     their slice is empty (access.js), not that the system is new. */
+  if(bossRestricted()) return;
   if(DB.leads.length===0){
     const l1 = {id:uid('LMS'), firstName:'Karan', lastName:'Vora', mobile:'9876500011', email:'karan.vora@gmail.com', source:'Client Referral', referrerClientId:null, city:'Mumbai', state:'Maharashtra', branch:'Varanasi', productInterest:'Mutual Funds', assignedTo:currentUser, nextFollowup: futureDate(2), description:'Warm referral, wants SIP planning.', createdAt:new Date().toISOString(), createdBy:currentUser};
     const l2 = {id:uid('LMS'), firstName:'Sneha', lastName:'Iyer', mobile:'9876500022', email:'sneha.iyer@gmail.com', source:'Website', city:'Pune', state:'Maharashtra', branch:'Mumbai', productInterest:'PMS', assignedTo:currentUser, nextFollowup: futureDate(5), description:'', createdAt:new Date().toISOString(), createdBy:currentUser};
@@ -36858,6 +36907,7 @@ function visibleRecordsByScope(list, ownerFn, branchFn){
   /* A partner's records are the ones they own and the ones they brought
      (partnerPobId), and on team scope those of every partner reporting to
      them. Their own onboarding record is theirs too. */
+  if(isPartnerStaff(u)) return notDeleted;   // the server sent only their reach (access.js)
   if(isPartnerMember(u)){
     const people = u.scope==='team' ? [u].concat(userDescendants(u.id)) : [u];
     const ids = new Set(people.map(t=>t.id)), pobs = new Set(people.map(t=>t.partnerPobId).filter(Boolean));
@@ -37089,7 +37139,7 @@ function navigate(view, arg){
   } else if(view==='pqs'){
     /* a list page; a query asked for by id opens over it */
     window._pqsOpen = (arg!==undefined && arg!=='') ? arg : null;
-  } else if(['ppo','ppf','mypj'].includes(view)){
+  } else if(['ppo','ppf','mypj','myteam'].includes(view)){
     /* list pages with nothing open on them */
   } else if(view==='dst'){
     dstDetailId = (arg!==undefined) ? arg : null;
@@ -37179,6 +37229,10 @@ async function boot(){
      let in as the first member on the list: that member is the Admin. */
   if(signedInMemberMissing()){ renderUnlinkedAccount(); return; }
   if(window.CRM_MUST_CHANGE_PASSWORD){ renderPasswordMustChange(); return; }
+  /* The upkeep below rewrites the firm's stores. A partner's page holds only
+     their own slice and may not write the rest (access.js), so it is run by
+     the company's sessions, never a partner's. */
+  if(!bossPartnerSide()){
   await autoPurgeExpiredRecords();
   await migrateProjects();
   await migrateWarmCallsOutOfMeetings();
@@ -37220,6 +37274,7 @@ async function boot(){
   await alignPlatformsOnce();
   await alignRolesOnce();
   await migrateQueryPermissions();
+  }
   bindSignedInMember();
   desktopNotifySweep();
   /* Now that the page is the person who signed in: a session left open
@@ -37231,8 +37286,9 @@ async function boot(){
   hrNudgeVerify().then(()=>hrNudgeTick());
   pushEnsure().catch(()=>{});
   await loadAccounts();
-  await migrateAllocPlans();
+  if(!bossPartnerSide()) await migrateAllocPlans();
   await loadMailChannel();
+  if(!bossPartnerSide()){
   await runDripJourneys();
   /* Everything already in the database is not newly created, so the
      baseline is taken before anything can fire — and then the rules that
@@ -37242,6 +37298,7 @@ async function boot(){
   /* Which connectors hold a credential, so the editor can say so without
      ever being told what it is. */
   await apiLoadSecretState();
+  }
   appBooted = true;
   render();
   /* Saves that never reached the server before the page was last closed. */
@@ -37251,6 +37308,7 @@ async function boot(){
      every ten minutes this session stays open, because there is no cron
      on the server and pretending otherwise would be the lie that is
      found out at 3am. */
+  if(!bossPartnerSide()){
   apiDrainInbox().then(n=>{ if(n) render(); }).catch(()=>{});
   apiRunDueSyncs().catch(()=>{});
   pyClientSyncSoon(8000);
@@ -37259,6 +37317,7 @@ async function boot(){
     apiRunDueSyncs().catch(()=>{});
     pyClientSyncSoon(0);
   }, 600000);
+  }
   // …and from here the screen keeps itself up to date: the stream for
   // speed, and the catch-up underneath it for the times the stream
   // cannot deliver — see liveCatchUp().
@@ -37919,6 +37978,7 @@ function render(){
     ppo:['Partner Payout System','What each partner is owed and paid'],
     ppf:['Partner Performance System','The funnel and each partner'],
     mypj:['My Partner Journey','Your tasks, performance and payouts'],
+    myteam:['My Team','The RMs and Operations staff you have built your team with'],
     pydash:['Payout Dashboard','Brokerage, payouts and compliance'], pyimports:['Data Import','Registrar files in'],
     pyclients:['Clients & Map','The payout team and who earns on each client'], pyreports:['Brokerage Settlements','Payouts, invoices and reconciliation'],
     pyrates:['Brokerage Rates','AMC brokerage rate master'], pypartner:['Partner Brokerage','Broking revenue from partners'],
@@ -38011,6 +38071,7 @@ function render(){
   else if(currentView==='ppo') c.innerHTML = viewPPO();
   else if(currentView==='ppf') c.innerHTML = viewPPF();
   else if(currentView==='mypj') c.innerHTML = viewMyPartnerJourney();
+  else if(currentView==='myteam') c.innerHTML = viewMyTeam();
   else if(typeof pyIsView === 'function' && pyIsView(currentView)) c.innerHTML = pyRender(currentView);
   else { currentView='dashboard'; c.innerHTML = viewDashboard(); } // unknown view (e.g. a stale bookmark) falls back to Dashboard instead of crashing or showing stale content
   seAlignTables();
@@ -38154,7 +38215,7 @@ const NAV_ICONS = {
   systemarchitecture:'🏛️', settings:'⚙️', profile:'👤', teammembers:'🧑‍💼', dwt:'🗓️', arc:'🔁', djt:'📔',
   inslife:'🛡️', inshealth:'🩺', insgeneral:'🏠',
   hrdashboard:'🧭', hrattendance:'⏱️', hrincentive:'💰', hrappraisal:'📈',
-  mypj:'🧗', pps:'🌱', pms:'🤝', pob:'🚀', pqs:'🎫', ppo:'💸', ppf:'🏆',
+  mypj:'🧗', myteam:'👥', pps:'🌱', pms:'🤝', pob:'🚀', pqs:'🎫', ppo:'💸', ppf:'🏆',
   pydash:'📊', pyimports:'⬆️', pyclients:'🗂️', pyreports:'🧾', pyrates:'💹', pypartner:'🤝', pyledger:'🏦', pyaudit:'📜', pysettings:'⚙️',
 };
 const NAV_LABELS = {
@@ -38171,7 +38232,7 @@ const NAV_LABELS = {
   fqtests:'FQ Assessments', iseqforms:'ISEQ Forms', cifforms:'CIF Forms',
   planforms:'Plan Input Forms', ctforms:'C&T Forms', profileforms:'Client Profile Forms',
   pps:'PPS · Partner Perspective System', pms:'Onboarding · Partner Onboarding', pob:'PMS · Partner Managing System', pqs:'PQS · Partner Query System',
-  ppo:'Partner Payout System', ppf:'Partner Performance System', mypj:'My Partner Journey',
+  ppo:'Partner Payout System', ppf:'Partner Performance System', mypj:'My Partner Journey', myteam:'My Team',
   pydash:'Payout Dashboard', pyimports:'Data Import', pyclients:'Clients & Map', pyreports:'Reports & Payouts',
   pyrates:'Brokerage Rates', pypartner:'Partner Brokerage', pyledger:'Payouts Ledger', pyaudit:'Audit Log', pysettings:'Payout Settings',
 };
@@ -38211,8 +38272,8 @@ const NAV_GROUPS = [
   /* The same idea for partners: a prospect walks PPS to the fee, and as a
      partner walks PMS to onboarding. Queries, payouts and performance hang
      off the partner. */
-  {id:'partnerjourney', icon:'🤝', label:'Partner Journey', items:['mypj','pps','pms','pob','pqs','ppo','ppf'],
-   itemGate: v=>v!=='mypj' || isPartnerMember(),
+  {id:'partnerjourney', icon:'🤝', label:'Partner Journey', items:['mypj','myteam','pps','pms','pob','pqs','ppo','ppf'],
+   itemGate: v=>(v!=='mypj' || (isPartnerMember() && !isPartnerStaff())) && (v!=='myteam' || plvMayBuildTeam()),
    about:'A partner from first registration, through the fee and the exams, to onboarding, payouts and performance.'},
   /* Portfolio Review and Mail were sections of their own here for a day.
      They belong to a review, not to the sidebar — the firm asked for them
@@ -58124,7 +58185,7 @@ function pobImportPlan(rows){
     if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x.email)) problems.push('access email "' + x.email + '" is not usable');
     if(seen[x.email]) problems.push('this email is on the sheet twice'); seen[x.email] = 1;
     const level = pobImportLevel(x.level, x.role);
-    if(!level) problems.push('level "' + x.level + '" is not L1–L6 (L7 is the company)');
+    if(!level) problems.push('level "' + x.level + '" is not L1–L6 (L7 Super Admin is given one person at a time, from their record, never by import)');
     const role = pobImportKey(x.role);
     const bizRole = POB_ROLES.find(r=>pobImportKey(r)===role) || '';
     const payRole = {'partner':'partner', 'mentor':'mentor', 'ops':'ops', 'ops / rm':'ops', 'rm':'ops'}[role] || '';
@@ -58955,7 +59016,7 @@ function pobEvaluationHtml(r){
 /* ---------- the partner's BOSS login (public/partner-levels.js) ----------
    An active partner works in BOSS itself, not on a page of their own. The
    login is a team member carrying partnerPobId (this record) and
-   partnerLevel (L1–L6, Setup › Partner Levels), so the same sign-in, rail,
+   partnerLevel (L1–L7, Setup › Partner Levels), so the same sign-in, rail,
    records and permissions the firm uses decide what they open and whose
    records they see. It reports to the senior partner it is mapped to (an
    FBP to its FBM), else to the partner's RM, so the RM's team scope and a
@@ -58963,9 +59024,18 @@ function pobEvaluationHtml(r){
 const PLV = window.PartnerLevels;
 function plvLevels(){ return PLV.levels(DB.config.partnerLevels); }
 function plvLevel(k){ return PLV.level(DB.config.partnerLevels, k) || plvLevels()[0]; }
-function isPartnerMember(u){ u = u || me(); return !!(u && u.partnerPobId); }
+function isPartnerMember(u){ u = u || me(); return !!(u && (u.partnerPobId || u.partnerTeamOf)); }
+/* Somebody a partner (L5+) hired for their own team: an RM or Operations. */
+function isPartnerStaff(u){ u = u || me(); return !!(u && u.partnerTeamOf && !u.partnerPobId); }
+function partnerOfStaff(u){ u = u || me(); return u && u.partnerTeamOf ? (DB.team||[]).find(t=>t && t.id===u.partnerTeamOf) || null : null; }
+function plvMayBuildTeam(u){ u = u || me(); return !!(u && u.partnerPobId && PLV.has(plvLevel(u.partnerLevel), 'buildTeam')); }
 function pobMemberOf(r){ return r ? (DB.team||[]).find(t=>t && t.partnerPobId===r.id) || null : null; }
-function memberPartnerRecord(u){ u = u || me(); return u && u.partnerPobId ? pobRecords().find(x=>x.id===u.partnerPobId) || null : null; }
+function memberPartnerRecord(u){
+  u = u || me();
+  // A partner's staff work inside that partner's business.
+  if(u && !u.partnerPobId && u.partnerTeamOf){ const b = partnerOfStaff(u); u = b; }
+  return u && u.partnerPobId ? pobRecords().find(x=>x.id===u.partnerPobId) || null : null;
+}
 function pobLevelOf(r){ const m = pobMemberOf(r); return (m && m.partnerLevel) || PLV.levelForRole(r.role); }
 function pobReportsTo(r){
   const up = r.fbmPobId ? pobMemberOf(pobRecords().find(x=>x.id===r.fbmPobId)) : null;
@@ -58992,13 +59062,19 @@ function plvSummary(lv){
 const PLV_PJ_VIEWS = ['pps','pms','pob'];
 function partnerPageOpen(view, u){
   u = u || me();
-  if(['mypj','ppf','pqs'].includes(view)) return true;
+  if(isAdmin(u)) return true;                      // L7
+  if(view === 'myteam') return plvMayBuildTeam(u);
+  const staff = isPartnerStaff(u);
+  if(view === 'pqs') return true;
+  if(['mypj','ppf'].includes(view)) return !staff;
   if(['teammembers','recyclebin','import'].includes(view)) return false;
   const g = navGroupOf(view);
   if(!g) return true;
+  if(g === 'hr') return false;                     // company HR is closed below L7
   if(g === 'partnerjourney' && !PLV_PJ_VIEWS.includes(view)) return false;
   const r = memberPartnerRecord(u);
   if(!r || !pobClientJourneyOpen(r)) return false;
+  if(staff) return PLV.staffRole(u.partnerStaffRole).groups.includes(g);
   return plvLevel(u.partnerLevel).groups.includes(g);
 }
 /* The level's roles are in the firm's role list, so a partner's profile
@@ -59018,9 +59094,12 @@ function plvApply(m, lv){
   m.scope = lv.scope;
   m.perms = PLV.perms(lv, MODULES);
   m.adminFlags = fullAdminFlags(false);
+  // L6 holds the administrative controls Setup assigned it, and no others;
+  // L7 holds them all.
+  (lv.adminFlags || []).forEach(f=>{ m.adminFlags[f] = 1; });
+  if(PLV.has(lv, 'superAdmin')) m.adminFlags = fullAdminFlags(true);
   m.pagePerms = [];
-  /* HR opens its three modules for a level given it (L5, L6); everybody
-     else's HR, and administering it, stay for HR to grant by hand. */
+  /* Company HR is for L7 only: the server keeps L1–L6 out of it too. */
   const hr = lv.groups.includes('hr') ? 1 : 0;
   m.hrAccess = Object.assign({}, m.hrAccess, {attendance: hr, incentive: hr, appraisal: hr});
   if(!hr) Object.assign(m.hrAccess, {staff: 0, admin: 0});
@@ -59114,7 +59193,7 @@ async function pobGiveLogin(r, o){
    holds. Payouts then decides whose numbers each of them sees by that same
    line: L1 and L2 their own, L3 up everyone mapped below them. Only an
    admin can change the payout team, so for anybody else this does nothing. */
-function pobPayoutLevel(m){ return Math.min(6, Math.max(1, Number(String(m.partnerLevel||'L1').replace(/\D/g,'')) || 1)); }
+function pobPayoutLevel(m){ return Math.min(7, Math.max(1, Number(String(m.partnerLevel||'L1').replace(/\D/g,'')) || 1)); }
 /* PAYOUT CLIENTS ARE BOSS CLIENTS.
 
    A client who arrives through Payouts (a folio master, a brokerage file, the
@@ -59329,16 +59408,23 @@ async function pobSetLoginStatus(id, status){
 /* Setup › Partner Levels: what each level opens, and whose records it sees. */
 function renderSettingsPartnerLevels(){
   const n = lv => DB.team.filter(t=>t.partnerLevel===lv.k).length;
+  const scopesFor = lv => PLV.SCOPES.filter(([k])=>PLV.allowedScope(lv.k, k) === k);
+  const capLabel = c => (PLV.CAPS.find(x=>x[0]===c) || ['', c])[1];
   return `<div class="card" style="padding:16px">
-    <p class="small-note" style="margin-top:0">An active partner signs in to BOSS itself at <b>${esc(location.origin)}/login</b> and works in the same modules as the firm, as far as their level opens.
-      L1–L3 always see their own tasks, performance and payouts under Partner Journey. <b>Own business only</b> means the leads, clients and work they brought or own;
-      <b>Partners mapped to them</b> adds every partner who reports to them, however deep. A partner's login is given from their PMS record.</p>
-    <div class="table-wrap"><table><thead><tr><th>Level</th>${PLV.GROUPS.map(g=>`<th style="text-align:center">${esc(g.l)}</th>`).join('')}<th>Data they see</th><th class="num">Partners</th></tr></thead><tbody>
+    <p class="small-note" style="margin-top:0">Partners sign in on the <b>Partner Platform</b> (partner.freedomlifex.co.in); company staff on the <b>Company Platform</b>
+      (one.freedomlifex.co.in). Both work on the same records. The server enforces what each level sees and changes, so these settings are not just what the screen shows.
+      <b>L1–L2</b> always see only their own data. <b>Own + mapped partners</b> adds every partner who reports to them, however deep. Company HR, employee records, payouts
+      administration and Setup stay closed below <b>L7</b>; <b>L6</b> holds only the controls ticked for it below. A partner's login is given from their PMS record.</p>
+    <div class="table-wrap"><table><thead><tr><th>Level</th>${PLV.GROUPS.map(g=>`<th style="text-align:center">${esc(g.l)}</th>`).join('')}<th>Data they see</th><th>Adds</th><th class="num">Partners</th></tr></thead><tbody>
     ${plvLevels().map(lv=>`<tr><td><b>${esc(lv.k)}</b> · ${esc(lv.name)}</td>
-      ${PLV.GROUPS.map(g=>`<td style="text-align:center"><input type="checkbox" id="plv_${lv.k}_${g.k}" ${lv.groups.includes(g.k)?'checked':''}></td>`).join('')}
-      <td><select id="plv_${lv.k}_scope">${PLV.SCOPES.map(([k,l])=>`<option value="${k}" ${lv.scope===k?'selected':''}>${esc(l)}</option>`).join('')}</select></td>
+      ${PLV.GROUPS.map(g=>{ const fixed = lv.k==='L7' || (g.k==='hr'); return `<td style="text-align:center"><input type="checkbox" id="plv_${lv.k}_${g.k}" ${lv.groups.includes(g.k)?'checked':''} ${fixed?'disabled':''}></td>`; }).join('')}
+      <td><select id="plv_${lv.k}_scope" ${scopesFor(lv).length < 2 ? 'disabled' : ''}>${scopesFor(lv).map(([k,l])=>`<option value="${k}" ${lv.scope===k?'selected':''}>${esc(l)}</option>`).join('')}</select></td>
+      <td class="small-note">${esc((PLV.LEVELS.find(d=>d.k===lv.k).caps.filter(c=>{ const below = PLV.LEVELS[PLV.KEYS.indexOf(lv.k)-1]; return !below || !below.caps.includes(c); }).map(capLabel).join(', ')) || 'Own data')}</td>
       <td class="num">${n(lv)}</td></tr>`).join('')}
     </tbody></table></div>
+    <div class="field" style="margin-top:12px"><label>Administrative controls L6 (Zen Monks) holds</label>
+      <div class="row" style="gap:14px;flex-wrap:wrap">${PLV.L6_ADMIN_FLAGS.map(f=>`<label style="font-weight:400"><input type="checkbox" id="plv_L6_flag_${f}" ${plvLevel('L6').adminFlags.includes(f)?'checked':''}> ${esc(f.replace(/([A-Z])/g,' $1').replace(/^./,c=>c.toUpperCase()))}</label>`).join('')}</div>
+      <div class="small-note" style="margin-top:4px">These open the matching Setup screens to L6. They never widen whose records L6 sees.</div></div>
     <div class="row" style="gap:8px;margin-top:10px"><button class="btn primary" onclick="plvSaveSettings()">Save &amp; Apply to Partners</button></div>
   </div>`;
 }
@@ -59348,6 +59434,7 @@ async function plvSaveSettings(){
   PLV.LEVELS.forEach(d=>{
     levels[d.k] = {groups: PLV.GROUPS.filter(g=>{ const b = document.getElementById('plv_' + d.k + '_' + g.k); return b && b.checked; }).map(g=>g.k),
       scope: (document.getElementById('plv_' + d.k + '_scope')||{}).value || d.scope};
+    if(d.k === 'L6') levels[d.k].adminFlags = PLV.L6_ADMIN_FLAGS.filter(f=>{ const b = document.getElementById('plv_L6_flag_' + f); return b && b.checked; });
   });
   DB.config.partnerLevels = {levels, v: PLV.VERSION, updatedAt: new Date().toISOString(), updatedBy: currentUser};
   await save('config');
@@ -59356,6 +59443,77 @@ async function plvSaveSettings(){
   if(members.length) await save('team');
   await logAudit('Settings', 'partnerLevels', 'Partner Levels Changed', PLV.LEVELS.map(d=>({field: d.k, oldValue: '', newValue: plvSummary(plvLevel(d.k))})));
   alert('Saved, and applied to ' + members.length + ' partner login(s).'); render();
+}
+/* ---------- My Team: the people an L5+ partner hires ----------
+   A partner on L5 (Monks) or above builds a team of their own: RMs who work
+   their own clients, and Operations staff who work the partner's whole book.
+   Each is a team member carrying partnerTeamOf (this partner) and
+   partnerStaffRole, signs in on the Partner Platform, and is held by the
+   server to that partner's business (access.js). A partner cannot give them
+   company-wide access, administrative controls or HR. */
+function ptMembers(){ const u = me(); return (DB.team||[]).filter(t=>t && !t.deletedAt && t.partnerTeamOf===u.id); }
+function viewMyTeam(){
+  if(!plvMayBuildTeam()) return `<div class="card"><div class="empty">Building a team of your own opens at partner level L5 (Monks).</div></div>`;
+  const rows = ptMembers();
+  return moduleHeader({title:'My Team', subtitle:'The RMs and Operations staff you have built your team with. They sign in on the Partner Platform and work only within your business.',
+      actions:[{label:'Add Team Member', icon:'+', kind:'primary', onclick:'ptOpenForm()'}]})
+    + `<div class="card"><div class="table-wrap"><table id="ptTable"><thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Mobile</th><th>Status</th><th>Sign-in</th><th></th></tr></thead><tbody>
+      ${rows.map(t=>`<tr><td><b>${esc(t.name||'')}</b></td><td>${esc(PLV.staffRole(t.partnerStaffRole).l)}</td><td>${esc(t.email||'')}</td><td>${esc(t.mobile||'')}</td>
+        <td>${esc(memberStatus(t))}</td><td class="small-note">${t.accountCreatedAt ? 'Created ' + esc(fmtDate(t.accountCreatedAt)) : 'Not yet'}</td>
+        <td><button class="btn sm" onclick="ptOpenForm('${esc(t.id)}')">Edit</button></td></tr>`).join('')
+      || `<tr><td colspan="7"><div class="empty">Nobody in your team yet.</div></td></tr>`}
+    </tbody></table></div></div>`;
+}
+function ptOpenForm(id){
+  const t = id ? ptMembers().find(x=>x.id===id) : null;
+  if(id && !t) return;
+  const up = (t && t.parentUserId) || currentUser;
+  const ups = [me()].concat(ptMembers().filter(x=>!t || x.id !== t.id));
+  openModal(t ? 'Team Member — ' + (t.name||'') : 'Add Team Member',
+    fieldInput({k:'ptName', l:'Name', t:'text', req:1}, t ? t.name : '')
+    + fieldInput({k:'ptEmail', l:'Email (their sign-in)', t:'text', vk:'email', req:1}, t ? t.email : '')
+    + fieldInput({k:'ptMobile', l:'Mobile', t:'text', vk:'mobile'}, t ? t.mobile : '')
+    + `<div class="field"><label>Role</label><select id="ptRole">${PLV.STAFF_ROLES.map(r=>`<option value="${r.k}" ${t && t.partnerStaffRole===r.k?'selected':''}>${esc(r.l)}</option>`).join('')}</select>
+        <div class="small-note" style="margin-top:4px">An RM works the clients assigned to them. Operations works your whole book.</div></div>`
+    + `<div class="field"><label>Reports to</label><select id="ptUp">${ups.map(x=>`<option value="${esc(x.id)}" ${x.id===up?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>`
+    + (t ? `<div class="field"><label>Status</label><select id="ptStatus">${['Active','Inactive'].map(v=>`<option ${memberStatus(t)===v?'selected':''}>${v}</option>`).join('')}</select></div>` : ''),
+    `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="ptSave('${esc(id||'')}')">${t ? 'Save' : 'Add &amp; Send Login'}</button>`);
+}
+async function ptSave(id){
+  if(!plvMayBuildTeam()){ alert('Building a team opens at partner level L5.'); return; }
+  const f = [{k:'ptName', l:'Name', req:1}, {k:'ptEmail', l:'Email', req:1, vk:'email'}, {k:'ptMobile', l:'Mobile', vk:'mobile'}];
+  const d = readFields(f);
+  if(!validateRequired(f, d)) return;
+  const email = String(d.ptEmail).trim();
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ alert('The email has to be an email address.'); return; }
+  const role = PLV.staffRole((document.getElementById('ptRole')||{}).value);
+  const up = (document.getElementById('ptUp')||{}).value || currentUser;
+  const at = new Date().toISOString();
+  let t = id ? ptMembers().find(x=>x.id===id) : null;
+  const dup = (DB.team||[]).find(x=>x !== t && !x.deletedAt && x.email && x.email.toLowerCase()===email.toLowerCase());
+  if(dup){ alert('That email already belongs to ' + (dup.name || 'somebody else') + '.'); return; }
+  const grid = {role: role.l, designation: role.l + ' · ' + (me().name || 'Partner'), partnerStaffRole: role.k, scope: 'own',
+    perms: PLV.staffPerms(role.k, MODULES), adminFlags: fullAdminFlags(false), hrAccess: {}, pagePerms: []};
+  if(!t){
+    t = Object.assign({id: uid('USR'), name: d.ptName, email, mobile: d.ptMobile || '', status: 'Active', branch: me().branch || '',
+      parentUserId: up, managerIds: [up], departments: [], partnerTeamOf: currentUser, joinedAt: at, createdAt: at, createdBy: currentUser,
+      documents: [], notes: []}, grid);
+    DB.team.push(t);
+  } else {
+    Object.assign(t, grid, {name: d.ptName, email, mobile: d.ptMobile || '', parentUserId: up, managerIds: [up],
+      status: (document.getElementById('ptStatus')||{}).value || memberStatus(t), updatedAt: at, updatedBy: currentUser});
+  }
+  try { await save('team'); } catch(e){ alert('Not saved: ' + e.message); return; }
+  await logAudit('Team', t.id, id ? 'Team Member Changed' : 'Team Member Added', [{field:'Team member', oldValue:'', newValue: t.name + ' · ' + role.l}]);
+  const account = id ? await syncMemberAccount(t) : await provisionMemberAccount(t);
+  closeModal(); render();
+  if(!id && account && account.created){
+    const mailed = account.mail && account.mail.sent;
+    alert(t.name + ' is in your team.\n\n' + (mailed ? 'Their password has been emailed to ' + t.email + '.' : 'The password could NOT be emailed — ' + ((account.mail||{}).note || 'no mail connector') + '.')
+      + '\n\nThey sign in on the Partner Platform.');
+  } else if(account && account.ok === false && !account.skipped){
+    alert('Saved, but their sign-in account is not in step: ' + (account.message || ''));
+  }
 }
 /* ---------- My Partner Journey: a partner's own tasks and payouts ---------- */
 function viewMyPartnerJourney(){

@@ -11,6 +11,12 @@
 set -euo pipefail
 
 DOMAIN="${DOMAIN:-boss.freedomlifex.co.in}"
+# The two platforms (access.js): partners on one address, company staff on
+# the other, both served by this one app and store. DOMAIN stays as the
+# combined address everyone can still use.
+PARTNER_DOMAIN="${PARTNER_DOMAIN:-partner.freedomlifex.co.in}"
+COMPANY_DOMAIN="${COMPANY_DOMAIN:-one.freedomlifex.co.in}"
+ALL_DOMAINS="$DOMAIN $PARTNER_DOMAIN $COMPANY_DOMAIN"
 U=vishal-b2b2c
 HOME_DIR=/home/$U
 APP=$HOME_DIR/app
@@ -113,10 +119,16 @@ CRM_USERS_DB=$HOME_DIR/data/users.db
 CRM_PAYOUT_DB=$HOME_DIR/data/payout.db
 CRM_API_KEY=$(openssl rand -hex 32)
 CRM_SESSION_SECRET=$(openssl rand -hex 32)
+CRM_PARTNER_HOSTS=$PARTNER_DOMAIN
+CRM_COMPANY_HOSTS=$COMPANY_DOMAIN
+CRM_PARTNER_URL=https://$PARTNER_DOMAIN
+CRM_COMPANY_URL=https://$COMPANY_DOMAIN
 EOF
   echo "created $ENV_FILE with new secrets"
 else
   echo "keeping existing $ENV_FILE"
+  grep -q '^CRM_PARTNER_HOSTS=' $ENV_FILE || printf 'CRM_PARTNER_HOSTS=%s\nCRM_COMPANY_HOSTS=%s\nCRM_PARTNER_URL=https://%s\nCRM_COMPANY_URL=https://%s\n' \
+    "$PARTNER_DOMAIN" "$COMPANY_DOMAIN" "$PARTNER_DOMAIN" "$COMPANY_DOMAIN" >> $ENV_FILE
 fi
 chown $U:$U $ENV_FILE && chmod 600 $ENV_FILE
 
@@ -155,16 +167,22 @@ if [ -n "$EMAIL" ]; then
   (cd $APP && runuser -u $U -- env $(grep -v '^#' $ENV_FILE | xargs) "$NODE" scripts/user.js role "$EMAIL" admin)
 fi
 
-say "nginx site for $DOMAIN"
-if grep -rqs "server_name[^;]*\b$DOMAIN\b" /etc/nginx/sites-enabled/ && [ ! -f $SITE ]; then
-  die "another nginx site already uses $DOMAIN: $(grep -rls "server_name[^;]*\b$DOMAIN\b" /etc/nginx/sites-enabled/)"
-fi
-if [ ! -f $SITE ]; then
+say "nginx site for $ALL_DOMAINS"
+for d in $ALL_DOMAINS; do
+  if grep -rqs "server_name[^;]*\b$d\b" /etc/nginx/sites-enabled/ && ! grep -qs "server_name[^;]*\b$d\b" $SITE; then
+    die "another nginx site already uses $d: $(grep -rls "server_name[^;]*\b$d\b" /etc/nginx/sites-enabled/)"
+  fi
+done
+# Written when it is missing, and again when the addresses it answers on have
+# changed (the Partner and Company platforms were added). certbot puts its
+# HTTPS lines back below.
+if [ ! -f $SITE ] || ! grep -q "server_name $ALL_DOMAINS;" $SITE; then
+  [ -f $SITE ] && cp $SITE $SITE.bak
   cat > $SITE <<EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN;
+    server_name $ALL_DOMAINS;
     client_max_body_size 25m;
     location / {
         proxy_pass http://127.0.0.1:$PORT;
@@ -181,27 +199,34 @@ server {
 EOF
   ln -sf $SITE /etc/nginx/sites-enabled/$U
   if ! nginx -t 2>/dev/null; then
-    rm -f /etc/nginx/sites-enabled/$U $SITE
+    if [ -f $SITE.bak ]; then mv $SITE.bak $SITE; else rm -f /etc/nginx/sites-enabled/$U $SITE; fi
     nginx -t || true
-    die "nginx rejected the new site; removed it again, other sites untouched"
+    die "nginx rejected the site; the previous one is back, other sites untouched"
   fi
   systemctl reload nginx
-  echo "site enabled"
+  echo "site enabled for: $ALL_DOMAINS"
 else
-  echo "site already exists, leaving it as is"
+  echo "site already answers on $ALL_DOMAINS"
 fi
 
 say "HTTPS"
-IP_DNS=$(timeout 10 getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}' || true)
-if [ -z "$IP_DNS" ] || [[ " $(hostname -I) " != *" $IP_DNS "* ]]; then
-  echo "$DOMAIN resolves to '${IP_DNS:-nothing}', not this server ($(hostname -I | awk '{print $1}'))."
-  echo "Add a DNS A record for 'boss' pointing at this server's IP, wait a few minutes,"
-  echo "then re-run this script to get HTTPS. The site works on http:// meanwhile."
+# A certificate for every address that already points at this server; the
+# rest are named so their DNS record can be added, and picked up on a re-run.
+HERE=" $(hostname -I) "
+READY=""
+for d in $ALL_DOMAINS; do
+  ip=$(timeout 10 getent ahostsv4 "$d" | awk 'NR==1{print $1}' || true)
+  if [ -n "$ip" ] && [[ "$HERE" == *" $ip "* ]]; then READY="$READY -d $d"
+  else echo "$d resolves to '${ip:-nothing}', not this server ($(hostname -I | awk '{print $1}')). Add a DNS A record for it, then re-run this script."; fi
+done
+if [ -z "$READY" ]; then
+  echo "No address points here yet. The site works on http:// once DNS is in place."
   exit 0
 fi
 command -v certbot >/dev/null || apt-get install -y -q certbot python3-certbot-nginx
-certbot --nginx -d "$DOMAIN" --redirect --non-interactive --agree-tos \
+certbot --nginx $READY --cert-name "$U" --expand --redirect --non-interactive --agree-tos \
   --register-unsafely-without-email --keep-until-expiring
 
-say "Done: https://$DOMAIN"
-
+say "Done"
+for d in $ALL_DOMAINS; do echo "  https://$d"; done
+echo "  Partners sign in at https://$PARTNER_DOMAIN, company staff at https://$COMPANY_DOMAIN."

@@ -195,6 +195,13 @@ const COOKIE = 'finowise_session';
 // Load the whole store into memory once at boot; every request reads/writes this
 // object, and writeToDisk() persists it. Simple, and correct at this scale.
 let store = {};
+/* Moves on every write, so the access layer knows when what is in reach
+   has to be worked out again. */
+let storeRevision = 0;
+/* WHO MAY SEE AND CHANGE WHAT (access.js): the two platforms, partner levels
+   L1–L7, employee scopes, applied to every read and write of the store. */
+const { createAccess, platformOf, PLATFORM_LABEL } = require('./access');
+const access = createAccess({ getStore: () => store, revision: () => storeRevision });
 if (fs.existsSync(DB_FILE)) {
   try { store = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
   catch (e) { console.error('Could not parse existing data.json — starting from an empty store. Original error:', e.message); }
@@ -307,6 +314,7 @@ function publishChange(keys, origin) {
 }
 
 function writeToDisk() {
+  storeRevision++;
   if (writePending) { writeAgain = true; return; } // coalesce rapid back-to-back writes into one
   writePending = true;
   const tmpFile = DB_FILE + '.tmp';
@@ -840,7 +848,14 @@ function branding() {
 const esc = (v) => String(v).replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-function loginPage({ error = null, next = '/', email = '' } = {}) {
+/* The address of the other platform, from this one: partner.x <-> one.x. */
+function platformAddress(req, want) {
+  const env = want === 'partner' ? process.env.CRM_PARTNER_URL : process.env.CRM_COMPANY_URL;
+  if (env) return env;
+  const host = String(req.headers.host || '').replace(/^(partner|one)\./i, '');
+  return 'https://' + (want === 'partner' ? 'partner.' : 'one.') + host;
+}
+function loginPage({ error = null, next = '/', email = '', platform = 'combined' } = {}) {
   const b = branding();
   const mark = `<img class="logo-img" src="${esc(b.logo || FALLBACK_LOGO)}" alt="${esc(b.name)}">`;
 
@@ -877,6 +892,8 @@ function loginPage({ error = null, next = '/', email = '' } = {}) {
   .mark{display:flex; justify-content:center; margin-bottom:4px}
   .logo-img{max-height:128px; max-width:300px; width:auto; display:block}
   .rule{height:1px; background:var(--line); margin:24px 0 22px}
+  .platform{text-align:center; margin-top:10px; font-size:12px; font-weight:700; letter-spacing:1.4px;
+    text-transform:uppercase; color:var(--gold)}
   label{display:block; font-size:12.5px; font-weight:600; margin-bottom:7px; letter-spacing:.2px}
   input[type=password], input[type=email]{
     width:100%; padding:12px 13px; font-size:15px; font-family:inherit; color:var(--text);
@@ -910,6 +927,7 @@ function loginPage({ error = null, next = '/', email = '' } = {}) {
     <form class="card" method="POST" action="/login">
       <input type="hidden" name="next" value="${esc(next)}">
       <div class="mark">${mark}</div>
+      ${PLATFORM_LABEL[platform] ? `<div class="platform">${esc(PLATFORM_LABEL[platform])}</div>` : ''}
       <div class="rule"></div>
       ${error ? `<p class="error">${esc(error)}</p>` : ''}
       <label for="email">Email</label>
@@ -928,7 +946,7 @@ function loginPage({ error = null, next = '/', email = '' } = {}) {
 
 app.get('/login', (req, res) => {
   if (isSignedIn(req)) return res.redirect(safeNext(req.query.next));
-  const page = loginPage({ next: safeNext(req.query.next) });
+  const page = loginPage({ next: safeNext(req.query.next), platform: platformOf(req) });
   const done = req.query.done === 'reset'
     ? page.replace('<div class="rule"></div>', '<div class="rule"></div><p class="error" style="color:var(--ok,#047857);background:rgba(4,120,87,.08);border-color:rgba(4,120,87,.25)">Your password is set. Sign in with it.</p>')
     : page;
@@ -1047,7 +1065,7 @@ function resetUserFor(token) {
 app.get('/reset-password', (req, res) => {
   res.set('Cache-Control', 'no-store');
   const token = String(req.query.token || '');
-  if (!resetUserFor(token)) return res.status(410).type('html').send(loginPage({ error: 'That reset link has expired or has already been used. Ask an administrator for a new one.' }));
+  if (!resetUserFor(token)) return res.status(410).type('html').send(loginPage({ platform: platformOf(req), error: 'That reset link has expired or has already been used. Ask an administrator for a new one.' }));
   res.type('html').send(passwordFormPage({ title: 'Choose a new password', action: '/reset-password', hidden: { token },
     intro: 'Choose the password you will sign in with. Nobody else, admins included, will be able to see it.' }));
 });
@@ -1055,7 +1073,7 @@ app.post('/reset-password', (req, res) => {
   res.set('Cache-Control', 'no-store');
   const token = String((req.body || {}).token || '');
   const u = resetUserFor(token);
-  if (!u) return res.status(410).type('html').send(loginPage({ error: 'That reset link has expired or has already been used. Ask an administrator for a new one.' }));
+  if (!u) return res.status(410).type('html').send(loginPage({ platform: platformOf(req), error: 'That reset link has expired or has already been used. Ask an administrator for a new one.' }));
   const wrong = checkNewPassword(req.body);
   if (wrong) return res.status(400).type('html').send(passwordFormPage({ title: 'Choose a new password', action: '/reset-password', hidden: { token }, error: wrong,
     intro: 'Choose the password you will sign in with.' }));
@@ -1070,7 +1088,7 @@ app.post('/login', (req, res) => {
 
   if (tooManyAttempts(ip)) {
     return res.status(429).type('html')
-      .send(loginPage({ error: 'Too many attempts. Wait a few minutes and try again.', next,
+      .send(loginPage({ platform: platformOf(req), error: 'Too many attempts. Wait a few minutes and try again.', next,
                        email: String((req.body || {}).email || '').trim() }));
   }
   const email = String((req.body || {}).email || '').trim();
@@ -1081,22 +1099,34 @@ app.post('/login', (req, res) => {
   if (user && user.active === 0) {
     noteFailure(ip);
     return res.status(401).type('html')
-      .send(loginPage({ error: 'That email and password do not match.', next, email }));
+      .send(loginPage({ platform: platformOf(req), error: 'That email and password do not match.', next, email }));
   }
   // One message for both cases, so this cannot be used to discover which emails exist.
   if (!user || !passwordMatches(password, user.password_hash)) {
     noteFailure(ip);
     return res.status(401).type('html')
-      .send(loginPage({ error: 'That email and password do not match.', next, email }));
+      .send(loginPage({ platform: platformOf(req), error: 'That email and password do not match.', next, email }));
   }
   attempts.delete(ip);
+  /* Partners sign in on the partner platform, employees on the company
+     platform (access.js). The password was right, so saying where to go
+     gives nothing away. */
+  {
+    const platform = platformOf(req);
+    if (!access.mayUsePlatform(access.principal(user), platform)) {
+      return res.status(403).type('html').send(loginPage({ next, email, platform,
+        error: platform === 'partner'
+          ? 'This is the Partner Platform. Company staff sign in at ' + platformAddress(req, 'company') + '.'
+          : 'This is the Company Platform. Partners sign in at ' + platformAddress(req, 'partner') + '.' }));
+    }
+  }
   if (user.two_factor) {
     // The password was right; the session waits for the emailed code.
     const ch = newOtpChallenge(user, 'login', next);
     return sendOtp(ch, (err) => {
       if (err) {
         otpChallenges.delete(ch.id);
-        return res.status(503).type('html').send(loginPage({ next, email,
+        return res.status(503).type('html').send(loginPage({ platform: platformOf(req), next, email,
           error: 'Your account uses two-step sign-in, but the code could not be emailed (' + err
             + '). Ask an administrator to check the email connector.' }));
       }
@@ -1251,7 +1281,7 @@ function otpChallengeOf(req) {
 }
 function otpRestart(res, why) {
   res.clearCookie(OTP_COOKIE, { path: '/login' });
-  return res.status(401).type('html').send(loginPage({ error: why }));
+  return res.status(401).type('html').send(loginPage({ platform: platformOf(res.req), error: why }));
 }
 app.get('/login/otp', (req, res) => {
   res.set('Cache-Control', 'no-store');
@@ -1391,10 +1421,70 @@ function checkApiKey(req, res, next) {
   next();
 }
 
+/* THE WRITE LOG — who changed which records, from which platform. Kept by
+   the server, one JSON line per save, so it holds whatever the page does or
+   does not remember to record itself: created, modified and removed ids,
+   and every refused attempt. Admins read it at /api/audit/writes. */
+const AUDIT_FILE = process.env.CRM_AUDIT_FILE || path.join(path.dirname(DB_FILE), 'access-audit.log');
+function auditDiff(beforeText, afterText, patch) {
+  if (patch && patch.kind === 'rows') {
+    return { changed: (patch.changes || []).map((c) => c && c.id).filter((x) => x !== undefined).slice(0, 200),
+      added: (patch.adds || []).map((r) => r && r.id).filter((x) => x !== undefined).slice(0, 200),
+      removed: (patch.removed || []).slice(0, 200) };
+  }
+  const a = parseOr(beforeText || '[]', []), b = parseOr(afterText || '[]', []);
+  if (!Array.isArray(a) || !Array.isArray(b)) return { whole: true };
+  const was = new Map(a.map((r) => [rowKey(r), r]));
+  const now = new Map(b.map((r) => [rowKey(r), r]));
+  const changed = [], added = [], removed = [];
+  now.forEach((r, k) => { if (k === null) return; const w = was.get(k); if (!w) added.push(k); else if (!sameRow(w, r)) changed.push(k); });
+  was.forEach((r, k) => { if (k !== null && !now.has(k)) removed.push(k); });
+  return { changed: changed.slice(0, 200), added: added.slice(0, 200), removed: removed.slice(0, 200) };
+}
+function writeAudit(req, who, key, detail) {
+  const d = detail || {};
+  if (!d.refused && !d.whole && !(d.changed || []).length && !(d.added || []).length && !(d.removed || []).length) return;
+  const line = JSON.stringify(Object.assign({
+    at: new Date().toISOString(),
+    by: (who && who.user && who.user.email) || (signedInUser(req) || {}).email || '',
+    member: (who && who.member && who.member.id) || '',
+    as: (who && who.label) || '',
+    platform: platformOf(req),
+    key,
+  }, d));
+  fs.appendFile(AUDIT_FILE, line + '\n', () => {});
+}
+app.get('/api/audit/writes', checkApiKey, (req, res) => {
+  const u = signedInUser(req);
+  if (!u || u.role !== 'admin') return res.status(403).json({ error: 'Only an admin can read the write log.' });
+  fs.readFile(AUDIT_FILE, 'utf8', (err, text) => {
+    const lines = err ? [] : String(text).trim().split('\n').filter(Boolean);
+    const key = String(req.query.key || ''), id = String(req.query.id || ''), by = String(req.query.by || '').toLowerCase();
+    const rows = [];
+    for (let i = lines.length - 1; i >= 0 && rows.length < Math.min(Number(req.query.limit) || 200, 2000); i--) {
+      let r; try { r = JSON.parse(lines[i]); } catch (e) { continue; }
+      if (key && r.key !== key) continue;
+      if (by && String(r.by || '').toLowerCase() !== by) continue;
+      if (id && ![].concat(r.changed || [], r.added || [], r.removed || []).map(String).includes(id)) continue;
+      rows.push(r);
+    }
+    res.set('Cache-Control', 'no-store').json({ rows });
+  });
+});
+/* Who the signed-in person is, as the server will treat them. */
+app.get('/api/me/access', checkApiKey, (req, res) => {
+  const p = access.principal(signedInUser(req));
+  res.set('Cache-Control', 'no-store').json(access.summary(p, platformOf(req)) || {});
+});
+
 // GET /api/storage/:key -> { key, value } | 404
 app.get('/api/storage/:key', checkApiKey, (req, res) => {
-  const value = store[req.params.key];
-  if (value === undefined) return res.status(404).json({ error: 'not found' });
+  const raw = store[req.params.key];
+  if (raw === undefined) return res.status(404).json({ error: 'not found' });
+  // Only the records this person may see (access.js). A store that is not
+  // theirs to read at all answers as if it were not there.
+  const value = access.read(req.params.key, raw, access.principal(signedInUser(req)));
+  if (value === null) return res.status(404).json({ error: 'not found' });
   res.json({ key: req.params.key, value });
 });
 
@@ -1887,8 +1977,20 @@ function mergeRecordList(before, after, removed) {
 }
 app.put('/api/storage/:key', checkApiKey, (req, res) => {
   let { value } = req.body || {};
-  const patch = (req.body || {}).patch;
+  let patch = (req.body || {}).patch;
   const before = store[req.params.key];
+  /* Somebody restricted (a partner, their staff, an employee with Own / Team
+     / Branch scope) may change only records in their reach; a whole-list
+     save from them becomes a patch against what they were shown. */
+  const who = access.principal(signedInUser(req));
+  if (access.restricted(who)) {
+    const v = access.authorize(req.params.key, before, req.body || {}, req.headers, who);
+    if (v.error) {
+      writeAudit(req, who, req.params.key, { refused: v.error });
+      return res.status(403).json({ error: v.error, refused: true });
+    }
+    if (v.patch) { patch = v.patch; value = undefined; }
+  }
   let merged = 0, touched = null, gone = [], keptStale = [], conflicts = [];
   if (patch && typeof patch === 'object') {
     /* Only what the browser changed, applied to the store as it is now. */
@@ -1971,11 +2073,13 @@ app.put('/api/storage/:key', checkApiKey, (req, res) => {
       return !mine || mine._mt !== r._mt || !sameRow(mine, r);
     });
     publishChange([req.params.key], (merged || keptStale.length) ? '' : (req.get('X-Client-Id') || ''));
+    writeAudit(req, who, req.params.key, auditDiff(before, value, patch));
     return res.json({ key: req.params.key, ok: true, rows, gone, kept: keptStale, merged, conflicts });
   }
   store[req.params.key] = value;
   writeToDisk();
   publishChange([req.params.key], merged ? '' : (req.get('X-Client-Id') || ''));
+  writeAudit(req, who, req.params.key, { whole: true });
   res.json({ key: req.params.key, ok: true, value: patch ? value : undefined, merged });
 });
 
@@ -1996,6 +2100,8 @@ app.delete('/api/storage/:key', checkApiKey, (req, res) => {
   {
     const u = signedInUser(req);
     const admin = !!(u && u.role === 'admin');
+    if (!access.deletable(req.params.key, access.principal(u)))
+      return res.status(403).json({ error: 'Not deleted: ' + req.params.key + ' is not yours to remove.' });
     if (CORE_STORE_KEYS.includes(req.params.key) && !admin) {
       console.error('Refused deleting ' + req.params.key + ' for a non-admin');
       return res.status(403).json({ error: 'Not deleted: only an admin can remove ' + req.params.key + '.' });
@@ -3760,12 +3866,36 @@ app.get('/api/users', checkApiKey, requireApiAdmin, (req, res) => {
 
 // Create or update the account a team member signs in with. Called whenever a
 // member is saved, so it has to be safe to call again with nothing changed.
-app.post('/api/users/sync', checkApiKey, requireApiAdmin, (req, res) => {
+/* An admin manages every account. A partner on L5 or above (buildTeam)
+   manages the accounts of their own team, and only as ordinary users. */
+function requireAccountManager(req, res, next) {
+  const user = signedInUser(req);
+  if (user && user.role === 'admin') return next();
+  const p = access.principal(user);
+  const memberId = String((req.body || {}).memberId || '').trim();
+  const row = storeList('team').find((t) => t && t.id === memberId);
+  if (p && p.kind === 'partner' && !p.unrestricted && p.level && PartnerLevelsLib.has(p.level, 'buildTeam')
+      && row && row.partnerTeamOf === p.member.id) { req.teamOnly = true; return next(); }
+  res.status(403).json({ ok: false, message: 'Only an admin can manage sign-in accounts.' });
+}
+const PartnerLevelsLib = require('./public/partner-levels.js');
+/* A partner below L7, or a partner's staff, is never a company admin,
+   whatever their CRM flags say: L6's administrative controls are the ones
+   assigned to it, not company-wide access. */
+function partnerMayBeAdmin(memberId) {
+  const m = storeList('team').find((t) => t && t.id === memberId);
+  if (!m) return true;
+  if (m.partnerTeamOf) return false;
+  if (!m.partnerPobId) return true;
+  const lv = PartnerLevelsLib.level((storeValue('config', {}) || {}).partnerLevels, m.partnerLevel || 'L1');
+  return !!(lv && PartnerLevelsLib.has(lv, 'superAdmin'));
+}
+app.post('/api/users/sync', checkApiKey, requireAccountManager, (req, res) => {
   const body = req.body || {};
   const memberId = String(body.memberId || '').trim();
   const email = String(body.email || '').trim();
   const crmRole = String(body.crmRole || '').trim();
-  const role = body.admin ? 'admin' : 'user';
+  const role = body.admin && !req.teamOnly && partnerMayBeAdmin(memberId) ? 'admin' : 'user';
   const active = body.active === false ? 0 : 1;
   res.set('Cache-Control', 'no-store');
   if (!memberId) return res.status(400).json({ ok: false, message: 'Which team member is this for?' });
@@ -3925,7 +4055,7 @@ function storeValue(key, fallback) {
    their submissions join the stream. The origin says it came from a client
    link rather than from a CRM tab, which is exactly the case no open browser
    should ignore. */
-function putList(key, list) { store[key] = JSON.stringify(stampRows(storeList(key), list)); publishChange([key], 'client-link'); }
+function putList(key, list) { store[key] = JSON.stringify(stampRows(storeList(key), list)); storeRevision++; publishChange([key], 'client-link'); }
 
 /* ---------------------------------------------------------------------
    FIELD VALIDATION, on the side that cannot be bypassed.
@@ -4963,7 +5093,8 @@ app.get('/config.js', (req, res) => {
   if (!user) {
     return res.type('application/javascript').set('Cache-Control', 'no-store')
       .send('window.CRM_API_KEY = "";window.CRM_IS_ADMIN = false;'
-          + 'window.CRM_USER_EMAIL = "";window.CRM_MEMBER_ID = "";');
+          + 'window.CRM_USER_EMAIL = "";window.CRM_MEMBER_ID = "";'
+          + 'window.BOSS_PLATFORM = ' + JSON.stringify(platformOf(req)) + ';window.BOSS_ACCESS = null;');
   }
   res.type('application/javascript').set('Cache-Control', 'no-store')
      .send('window.CRM_API_KEY = ' + JSON.stringify(API_KEY || '') + ';'
@@ -4973,7 +5104,11 @@ app.get('/config.js', (req, res) => {
          + 'window.CRM_USER_EMAIL = ' + JSON.stringify((user && user.email) || '') + ';'
          + 'window.CRM_MEMBER_ID = ' + JSON.stringify((user && user.member_id) || '') + ';'
          + 'window.CRM_MUST_CHANGE_PASSWORD = ' + JSON.stringify(!!(user && user.must_change)) + ';'
-         + 'window.CRM_PASSWORD_SET_AT = ' + JSON.stringify((user && user.password_set_at) || '') + ';');
+         + 'window.CRM_PASSWORD_SET_AT = ' + JSON.stringify((user && user.password_set_at) || '') + ';'
+         // Which platform this is (partner / company / combined) and how the
+         // server treats this person on it (access.js).
+         + 'window.BOSS_PLATFORM = ' + JSON.stringify(platformOf(req)) + ';'
+         + 'window.BOSS_ACCESS = ' + JSON.stringify(access.summary(access.principal(user), platformOf(req))) + ';');
 });
 
 /* ---------------------------------------------------------------------

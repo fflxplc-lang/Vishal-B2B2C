@@ -131,19 +131,21 @@ suite(async t => {
           body: JSON.stringify({value: JSON.stringify(list)})});
         return res.status + ' ' + ((await res.json().catch(() => ({}))).error || '');
       };
-      const base = DB.hrLeave.concat([{id: 'HRL-ZZC', userId: u.id, from: '2026-12-01', to: '2026-12-03', type: 'Sick Leave', status: 'Approved'}]);
+      /* Dates well clear of the leave the earlier steps booked (those are
+         dated from today, and a fixed December date met them in late November). */
+      const base = DB.hrLeave.concat([{id: 'HRL-ZZC', userId: u.id, from: '2027-03-01', to: '2027-03-03', type: 'Sick Leave', status: 'Approved'}]);
       const seeded = await put(base);
       const swap = (row, extra) => base.map(x => x.id === row ? Object.assign({}, x, extra) : x);
       return {
         seeded,
         noDates: await put(swap('HRL-ZZC', {status: 'Cancelled'})),
-        outside: await put(swap('HRL-ZZC', {status: 'Partially Cancelled', cancellation: {dates: ['2026-12-09']}})),
-        wrongKind: await put(swap('HRL-ZZC', {status: 'Cancelled', cancellation: {dates: ['2026-12-02']}})),
-        badRest: await put(swap('HRL-ZZC', {status: 'Partially Cancelled', cancellation: {dates: ['2026-12-02']}})
-          .concat([{id: 'HRL-ZZD', userId: u.id, from: '2026-12-02', to: '2026-12-03', status: 'Approved', remainderOf: 'HRL-ZZC'}])),
-        good: await put(swap('HRL-ZZC', {status: 'Partially Cancelled', cancellation: {dates: ['2026-12-02']}})
-          .concat([{id: 'HRL-ZZE', userId: u.id, from: '2026-12-01', to: '2026-12-01', status: 'Approved', remainderOf: 'HRL-ZZC'},
-                   {id: 'HRL-ZZF', userId: u.id, from: '2026-12-03', to: '2026-12-03', status: 'Approved', remainderOf: 'HRL-ZZC'}]))};
+        outside: await put(swap('HRL-ZZC', {status: 'Partially Cancelled', cancellation: {dates: ['2027-03-09']}})),
+        wrongKind: await put(swap('HRL-ZZC', {status: 'Cancelled', cancellation: {dates: ['2027-03-02']}})),
+        badRest: await put(swap('HRL-ZZC', {status: 'Partially Cancelled', cancellation: {dates: ['2027-03-02']}})
+          .concat([{id: 'HRL-ZZD', userId: u.id, from: '2027-03-02', to: '2027-03-03', status: 'Approved', remainderOf: 'HRL-ZZC'}])),
+        good: await put(swap('HRL-ZZC', {status: 'Partially Cancelled', cancellation: {dates: ['2027-03-02']}})
+          .concat([{id: 'HRL-ZZE', userId: u.id, from: '2027-03-01', to: '2027-03-01', status: 'Approved', remainderOf: 'HRL-ZZC'},
+                   {id: 'HRL-ZZF', userId: u.id, from: '2027-03-03', to: '2027-03-03', status: 'Approved', remainderOf: 'HRL-ZZC'}]))};
     });
     if(!/^200/.test(r.seeded) || !/^200/.test(r.good)) throw new Error(JSON.stringify(r));
     for(const k of ['noDates', 'outside', 'wrongKind', 'badRest']) if(!/^422/.test(r[k])) throw new Error(k + ': ' + r[k]);

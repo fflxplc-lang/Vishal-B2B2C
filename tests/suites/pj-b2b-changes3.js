@@ -391,7 +391,7 @@ suite({mail: true}, async t => {
     return 'Sherpa (L3): Client Journey, Operations, Sales; sees Nina’s client, not Kavya’s';
   });
 
-  await step('Setup › Partner Levels changes what a level opens; Monks get HR; suspending shuts the login', async () => {
+  await step('Setup › Partner Levels changes what a level opens; company HR is closed to Monks (L5) and open to L7; suspending shuts the login', async () => {
     const r = await t.eval(async ids => {
       window.alert = () => {};
       document.body.insertAdjacentHTML('beforeend', '<div id="plvTest">' + renderSettingsPartnerLevels() + '</div>');
@@ -409,17 +409,25 @@ suite({mail: true}, async t => {
       currentUser = ids.ninja;
       const l5 = ['hrdashboard','business','lms'].filter(v=>pageOpenToMe(v));
       currentUser = ids.admin;
+      pobOpenLoginModal('POB', o.id, '');
+      document.getElementById('lgLevel').value = 'L7';
+      await pobSaveLogin(o.id, '');
+      currentUser = ids.ninja;
+      const l7 = ['hrdashboard','business','lms'].filter(v=>pageOpenToMe(v));
+      currentUser = ids.admin;
       window.prompt = () => 'Test suspend';
       await pobSetLoginStatus(o.id, 'Suspended');
       const m = pobMemberOf(o);
       // put L1 back as the sheet has it
       DB.config.partnerLevels = null; await save('config');
-      return {l1, dst: k.perms.DST && k.perms.DST.view, l5, status: m.status, login: o.login.status};
+      return {l1, dst: k.perms.DST && k.perms.DST.view, l5, l7, status: m.status, login: o.login.status};
     }, ids);
     if(!r.l1 || !r.dst) throw new Error('the setting did not reach L1: ' + JSON.stringify(r));
-    if(r.l5.join() !== 'hrdashboard,business,lms') throw new Error('L5 opens ' + r.l5.join());
+    // Partners below L7 do not open the company's HR (Dual Platform spec, section 3).
+    if(r.l5.join() !== 'business,lms') throw new Error('L5 opens ' + r.l5.join());
+    if(r.l7.join() !== 'hrdashboard,business,lms') throw new Error('L7 opens ' + r.l7.join());
     if(r.status !== 'Inactive' || r.login !== 'Suspended') throw new Error(JSON.stringify(r));
-    return 'L1 given Operations from Setup; L5 opens ' + r.l5.join(', ') + '; suspended → Inactive';
+    return 'L1 given Operations from Setup; L5 opens ' + r.l5.join(', ') + ' (no company HR); L7 everything; suspended → Inactive';
   });
 
   await step('the empanelment form still draws', async () => {
