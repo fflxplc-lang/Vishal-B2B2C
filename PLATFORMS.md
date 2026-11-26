@@ -127,3 +127,31 @@ audit trail (`auditLog`) keeps recording field-level changes as before.
 - two-way sync between a partner and company Ops;
 - L5 team building, a live level change and the write log;
 - the partner's own screen in a browser.
+
+## Skill Development Center (courses and videos)
+
+`public/skill-center.js` is the page; `skill-center-server.js` is the server half.
+
+**Who sees which course.** An admin or course manager sets an access rule on each course. They do it in the builder's last step or from ⋯ › Manage Access.
+
+| Rule | Who can open it |
+|---|---|
+| All employees & partners | Everyone signed in |
+| Employees only | Company staff |
+| Partners only | Partners L1–L7 and their staff |
+| Specific people | The employees and partners picked by name |
+
+Admins see and manage every course, drafts included, and so do course managers. A course manager is:
+- an employee with the Admin role or Manage Module Settings;
+- or an L7 partner.
+
+The server enforces the rule in three places:
+- `GET /api/storage/sdcCourses` sends a learner only the published courses they were given. The list of people on a course is not sent to learners.
+- `GET /api/sdc/media/:id` streams a video or thumbnail only to someone who may see a course that uses it.
+- Only course managers may save the library or upload.
+
+**Videos.** Course managers upload a video straight into a lesson from the builder: MP4, WEBM, OGG or MOV, up to `CRM_SDC_VIDEO_MAX_MB` (1024 by default). The browser reads the video's length and makes a thumbnail before it uploads. The server streams the file to disk as it arrives (`POST /api/sdc/media`) and serves it back with byte ranges, so the player can seek.
+
+**Where videos are kept.** `CRM_SDC_MEDIA_DIR` sets the folder. `setup.sh` sets it to `/home/vishal-b2b2c/media`, beside `data/` rather than inside it. That keeps gigabytes of video out of the data backup taken on every deploy, so back up `media/` separately. nginx allows uploads up to 1100 MB on `/api/sdc/media` only; every other address keeps the 25 MB limit.
+
+A dedicated video-upload page is not in the menu yet. Uploads go through the course builder.

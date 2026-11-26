@@ -3294,8 +3294,21 @@ let selfDrawTimer = 0, selfDrawTries = 0;
    is not there yet (on a fresh install me() is undefined and render()
    throws). boot() draws once it is done, so nothing is lost by waiting. */
 let appBooted = false;
+/* A video playing on the page (the Skill Development Center's lesson
+   player): rebuilding the page would replace the <video> and stop it. The
+   player redraws its own pieces (the Completed button, the playlist, the
+   progress bar), so a redraw waits until it is paused. */
+function mediaPlaying(){
+  const v = document.querySelector('#content video');
+  if(!v) return false;
+  if(!v.paused && !v.ended) return true;
+  // …and the "lesson complete, up next" screen it shows when it finishes.
+  const end = document.getElementById('sdcEnded');
+  return !!(end && !end.hidden);
+}
 function drawAfterWrite(){
   if(!appBooted || systemResetting || inPublicMode() || typeof render !== 'function') return;
+  if(mediaPlaying()) return;
   if(!document.getElementById('root')) return;
   /* A background write (the attendance heartbeat every few minutes) must not
      rebuild a form somebody is filling in: its Save draws the page itself. */
@@ -3308,6 +3321,7 @@ function drawAfterWrite(){
     const typing = !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)
                         && a.type !== 'checkbox' && a.type !== 'radio');
     if(typing && selfDrawTries < 40){ selfDrawTries++; drawAfterWrite(); return; }
+    if(mediaPlaying()) return;     // started playing while this waited
     selfDrawTries = 0;
     try { render(); } catch(e){ console.error('redraw after write failed', e); }
   }, 300);
@@ -37677,6 +37691,7 @@ function liveBusy(){
   // and then audits. Reading somebody else's change into the middle of that
   // would take the ground from under it.
   if(Date.now() < liveWriteUntil) return true;
+  if(mediaPlaying()) return true;
   const o = document.getElementById('overlay');
   if(o && o.classList.contains('show')) return true;
   const a = document.activeElement;

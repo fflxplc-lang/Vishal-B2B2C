@@ -1483,8 +1483,11 @@ app.get('/api/storage/:key', checkApiKey, (req, res) => {
   if (raw === undefined) return res.status(404).json({ error: 'not found' });
   // Only the records this person may see (access.js). A store that is not
   // theirs to read at all answers as if it were not there.
-  const value = access.read(req.params.key, raw, access.principal(signedInUser(req)));
+  const reader = signedInUser(req);
+  let value = access.read(req.params.key, raw, access.principal(reader));
   if (value === null) return res.status(404).json({ error: 'not found' });
+  // The course library: only the courses this person has been given (skill-center-server.js).
+  if (req.params.key === 'sdcCourses') value = sdcServer.filterCourses(value, reader);
   res.json({ key: req.params.key, value });
 });
 
@@ -1983,6 +1986,11 @@ app.put('/api/storage/:key', checkApiKey, (req, res) => {
      / Branch scope) may change only records in their reach; a whole-list
      save from them becomes a patch against what they were shown. */
   const who = access.principal(signedInUser(req));
+  // The course library is written by admins and course managers only.
+  if (req.params.key === 'sdcCourses' && !sdcServer.mayManage(signedInUser(req))) {
+    writeAudit(req, who, req.params.key, { refused: 'not a course manager' });
+    return res.status(403).json({ error: 'Only an admin or a course manager can change the course library.', refused: true });
+  }
   if (access.restricted(who)) {
     const v = access.authorize(req.params.key, before, req.body || {}, req.headers, who);
     if (v.error) {
@@ -2100,6 +2108,8 @@ app.delete('/api/storage/:key', checkApiKey, (req, res) => {
   {
     const u = signedInUser(req);
     const admin = !!(u && u.role === 'admin');
+    if (req.params.key === 'sdcCourses' && !sdcServer.mayManage(u))
+      return res.status(403).json({ error: 'Only an admin or a course manager can remove the course library.' });
     if (!access.deletable(req.params.key, access.principal(u)))
       return res.status(403).json({ error: 'Not deleted: ' + req.params.key + ' is not yours to remove.' });
     if (CORE_STORE_KEYS.includes(req.params.key) && !admin) {
@@ -5761,6 +5771,10 @@ const partnerJourney = require('./partner-journey').install({ app, storeList, st
    A door of its own, with accounts of its own: see partner-portal.js. */
 require('./partner-portal').install({ app, storeList, storeValue, putList, writeToDisk,
   pj: partnerJourney, publicDir: path.join(__dirname, 'public') });
+/* SKILL DEVELOPMENT CENTER — per-course access and the lesson videos
+   (skill-center-server.js). */
+const sdcServer = require('./skill-center-server').install({ app, checkApiKey, signedInUser, storeList, storeValue,
+  dataDir: path.dirname(DB_FILE) });
 /* The separate partner login is gone: partners sign in to BOSS itself
    (Setup › Partner Levels). An old link or bookmark lands on the one
    sign-in page rather than on nothing. */

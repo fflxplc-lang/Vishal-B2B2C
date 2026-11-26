@@ -65,7 +65,7 @@ fi
 
 say "Linux user $U"
 id $U >/dev/null 2>&1 || adduser --system --group --home $HOME_DIR --shell /bin/bash $U
-mkdir -p $HOME_DIR/data $HOME_DIR/backups
+mkdir -p $HOME_DIR/data $HOME_DIR/backups $HOME_DIR/media
 
 say "Code"
 # Keep a copy of the data before touching the code (last 20 kept).
@@ -123,12 +123,16 @@ CRM_PARTNER_HOSTS=$PARTNER_DOMAIN
 CRM_COMPANY_HOSTS=$COMPANY_DOMAIN
 CRM_PARTNER_URL=https://$PARTNER_DOMAIN
 CRM_COMPANY_URL=https://$COMPANY_DOMAIN
+CRM_SDC_MEDIA_DIR=$HOME_DIR/media
 EOF
   echo "created $ENV_FILE with new secrets"
 else
   echo "keeping existing $ENV_FILE"
   grep -q '^CRM_PARTNER_HOSTS=' $ENV_FILE || printf 'CRM_PARTNER_HOSTS=%s\nCRM_COMPANY_HOSTS=%s\nCRM_PARTNER_URL=https://%s\nCRM_COMPANY_URL=https://%s\n' \
     "$PARTNER_DOMAIN" "$COMPANY_DOMAIN" "$PARTNER_DOMAIN" "$COMPANY_DOMAIN" >> $ENV_FILE
+  # Course videos live beside data/, not in it: the data backups taken on
+  # every deploy must not copy gigabytes of video each time.
+  grep -q '^CRM_SDC_MEDIA_DIR=' $ENV_FILE || echo "CRM_SDC_MEDIA_DIR=$HOME_DIR/media" >> $ENV_FILE
 fi
 chown $U:$U $ENV_FILE && chmod 600 $ENV_FILE
 
@@ -176,7 +180,7 @@ done
 # Written when it is missing, and again when the addresses it answers on have
 # changed (the Partner and Company platforms were added). certbot puts its
 # HTTPS lines back below.
-if [ ! -f $SITE ] || ! grep -q "server_name $ALL_DOMAINS;" $SITE; then
+if [ ! -f $SITE ] || ! grep -q "server_name $ALL_DOMAINS;" $SITE || ! grep -q "location /api/sdc/media" $SITE; then
   [ -f $SITE ] && cp $SITE $SITE.bak
   cat > $SITE <<EOF
 server {
@@ -184,6 +188,20 @@ server {
     listen [::]:80;
     server_name $ALL_DOMAINS;
     client_max_body_size 25m;
+    # Course videos are uploaded straight into a lesson: large, and streamed
+    # through to the app as they arrive rather than buffered by nginx.
+    location /api/sdc/media {
+        client_max_body_size 1100m;
+        proxy_request_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+        proxy_pass http://127.0.0.1:$PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
     location / {
         proxy_pass http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
