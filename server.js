@@ -2098,7 +2098,8 @@ app.put('/api/storage/:key', checkApiKey, (req, res) => {
 const CORE_STORE_KEYS = ['team', 'clients', 'leads', 'reviews', 'tasks', 'transactions', 'queries',
   'queryReplies', 'docLinks', 'docSubmissions', 'recommendations', 'businessEntries', 'communications',
   'hrAttendance', 'hrLeave', 'hrCompOff', 'auditLog', 'approvals', 'config', 'settings', 'apiConnectors',
-  'assetUploads', 'platformHoldings', 'platformSips', 'importBatches', 'partnerWebinars', 'pjOnboarding'];
+  'assetUploads', 'platformHoldings', 'platformSips', 'importBatches', 'partnerWebinars', 'pjOnboarding',
+  'websiteFqResults', 'sdcCourses'];
 app.delete('/api/storage/:key', checkApiKey, (req, res) => {
   if (store[req.params.key] === undefined) return res.status(404).json({ error: 'not found' });
   /* Deleting a key is emptying it in one go, past every guard a PUT has.
@@ -4911,7 +4912,12 @@ app.post('/api/public/website-lead', (req, res) => {
   if (!websiteLeadCors(req, res)) return res.status(403).json({ ok: false, message: 'This website is not allowed to send leads.' });
   if (websiteLeadThrottled(req)) return res.status(429).json({ ok: false, message: 'Too many requests. Please try again in a minute.' });
   const b = req.body || {};
-  if (b.consent !== true) return res.status(400).json({ ok: false, message: 'Consent to connect is required.' });
+  /* Every completed test is kept as a result (websiteFqResults), whether or
+     not the visitor asks to talk. Only a visitor who consents (consent:
+     true) becomes a lead with a meeting request; one who does not is a
+     result on its own — their contact details only if the website sent
+     them — and nobody is asked to call them. */
+  const consent = b.consent === true;
 
   const name = wlText(b.name, 80);
   const digits = String(b.mobile || '').replace(/\D/g, '');
@@ -4921,10 +4927,10 @@ app.post('/api/public/website-lead', (req, res) => {
   const referralName = wlText(b.referralName, 80);
   const occupation = wlText(b.occupation, 60);
   const wrong = [];
-  if (name.length < 2) wrong.push('Please enter your full name.');
-  if (!/^[6-9]\d{9}$/.test(mobile)) wrong.push('Please enter a valid 10-digit mobile number.');
+  if (consent || name) { if (name.length < 2) wrong.push('Please enter your full name.'); }
+  if (consent || digits) { if (!/^[6-9]\d{9}$/.test(mobile)) wrong.push('Please enter a valid 10-digit mobile number.'); }
   if (email && !ADDRESS_RE.test(email)) wrong.push('Please enter a valid email.');
-  if (!city) wrong.push('Please enter your city.');
+  if (consent && !city) wrong.push('Please enter your city.');
 
   const fq = b.fq && typeof b.fq === 'object' ? b.fq : {};
   const score = Number(fq.score);
@@ -4947,6 +4953,7 @@ app.post('/api/public/website-lead', (req, res) => {
     const t = String(v || '').trim();
     if (t && !slots.includes(t)) slots.push(t);
   });
+  if (!consent) slots.length = 0;   // times to call are for a visitor who asked to be called
   if (slots.length > 3) wrong.push('Please give at most 3 times.');
   if (slots.some((t) => !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(t) || isNaN(new Date(t + ':00+05:30'))))
     wrong.push('One of the times is not a complete date and time.');
@@ -4979,9 +4986,37 @@ app.post('/api/public/website-lead', (req, res) => {
     stage: stageKey, stageLabel: wlText(fq.stageLabel, 40),
     points: hasPoints ? points : null, maxPoints: hasPoints ? maxPoints : null, sections,
     completedAt: isNaN(completed) ? now : completed.toISOString(),
-    receivedAt: now, consentToConnect: true, consentAt: now,
+    receivedAt: now, consentToConnect: consent, consentAt: consent ? now : null,
     referralName, occupation, city,
   };
+  // The result itself, kept whatever the visitor chose.
+  const resultRow = {
+    id: 'WFQ-' + crypto.randomBytes(6).toString('hex').toUpperCase(),
+    receivedAt: now, completedAt: fqTest.completedAt,
+    name, mobile: /^[6-9]\d{9}$/.test(mobile) ? mobile : '', email: email && ADDRESS_RE.test(email) ? email : '',
+    city, occupation, referralName, consentToConnect: consent,
+    score, band: fqTest.band, stage: stageKey, stageLabel: fqTest.stageLabel,
+    points: fqTest.points, maxPoints: fqTest.maxPoints,
+    fqTest, leadId: '', leadCreated: false, assignedTo: '',
+  };
+  if (!consent) {
+    // Already a lead (the same mobile)? The result is filed with them too,
+    // as history, without touching their consent or asking anyone to call.
+    const leads = storeList('leads');
+    const known = resultRow.mobile && leads.find((l) => l && !l.deletedAt
+      && String(l.mobile || '').replace(/\D/g, '').slice(-10) === resultRow.mobile);
+    if (known) {
+      known.fqHistory = (Array.isArray(known.fqHistory) ? known.fqHistory : []).concat([fqTest]).slice(-10);
+      known.updatedAt = now;
+      resultRow.leadId = known.id; resultRow.assignedTo = known.assignedTo || '';
+      putList('leads', leads);
+    }
+    const results = storeList('websiteFqResults');
+    results.push(resultRow);
+    putList('websiteFqResults', results.slice(-20000));
+    writeToDisk();
+    return res.json({ ok: true, stored: true, created: false, id: resultRow.id, message: 'Thank you! Your result has been saved.' });
+  }
   const when = new Date(fqTest.completedAt).toLocaleString('en-IN', { timeZone: BUSINESS_TZ });
   const summary = 'Website FQ Test — score ' + score + '/100' + (hasPoints ? ' · ' + points + ' of ' + maxPoints + ' points' : '')
     + (fqTest.band ? ' (' + fqTest.band + ')' : '') + (fqTest.stageLabel ? ' · ' + fqTest.stageLabel : '')
@@ -5070,8 +5105,12 @@ app.post('/api/public/website-lead', (req, res) => {
     });
     putList('notifications', list);
   }
+  resultRow.leadId = lead.id; resultRow.leadCreated = created; resultRow.assignedTo = lead.assignedTo || '';
+  const results = storeList('websiteFqResults');
+  results.push(resultRow);
+  putList('websiteFqResults', results.slice(-20000));
   writeToDisk();
-  res.json({ ok: true, created, message: 'Thank you! Our team will get in touch with you shortly.' });
+  res.json({ ok: true, created, stored: true, id: resultRow.id, message: 'Thank you! Our team will get in touch with you shortly.' });
 });
 
 /* The live team member a sign-in account is: the one it is linked to, or,

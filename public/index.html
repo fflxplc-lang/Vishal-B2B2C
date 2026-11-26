@@ -20,6 +20,8 @@
 <script src="/multi-asset.js"></script>
 <!-- Skill Development Center: the learning library (course library, lesson player, course builder). -->
 <script src="/skill-center.js"></script>
+<!-- Website FQ Results: every FQ test taken on the website, kept and readable in full. -->
+<script src="/website-fq.js"></script>
 <link rel="stylesheet" href="/skill-center.css">
 <!-- Merge Clients: duplicate detection, the merge, and the names a merged
      client is also known by, which the import matching reads. -->
@@ -2173,6 +2175,37 @@ html.dark .cp-doc{background:rgba(30,107,133,.15)}
 .fqa-cat{display:inline-block;color:#fff;font-weight:800;font-size:17px;padding:8px 20px;border-radius:99px}
 .fqa-bar{display:flex;align-items:center;gap:10px;margin:10px 0;font-size:13.5px}
 .fqa-bar .lbl{width:112px;flex-shrink:0;color:var(--muted)}
+/* Website FQ Results (website-fq.js) */
+.wfq-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}
+.wfq-stats .card{padding:12px 14px;margin:0}
+.wfq-stats b{display:block;font-size:20px}
+.wfq-stats span{font-size:12px;color:var(--muted)}
+.wfq-band{display:inline-block;color:#fff;font-weight:700;font-size:11.5px;padding:3px 10px;border-radius:99px;white-space:nowrap}
+.wfq-band.lg{font-size:14px;padding:5px 14px;align-self:flex-start}
+.wfq-filters input,.wfq-filters select{border:1px solid var(--line);border-radius:var(--pill);padding:8px 14px;font:inherit;font-size:13px;
+  background:var(--card);color:var(--text);min-height:36px}
+.wfq-filters select{padding-right:30px}
+.wfq-filters input:focus,.wfq-filters select:focus{outline:none;border-color:var(--navy-2);box-shadow:var(--ring)}
+.wfq-hero{display:flex;gap:18px;align-items:center;padding:16px;border-radius:var(--radius-sm);border:1px solid var(--line);
+  background:linear-gradient(135deg,color-mix(in srgb,var(--band) 12%,transparent),transparent)}
+.wfq-dial{width:92px;height:92px;border-radius:50%;flex:none;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  border:6px solid var(--band);background:var(--card)}
+.wfq-dial b{font-size:28px;line-height:1}
+.wfq-dial span{font-size:11px;color:var(--muted)}
+.wfq-hero-main{display:flex;flex-direction:column;gap:6px;min-width:0}
+.wfq-hero-line{font-size:13px;color:var(--muted)}
+.wfq-pillars{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.wfq-pillars div{border:1px solid var(--line);border-radius:var(--radius-xs);padding:8px 10px;display:flex;justify-content:space-between;gap:8px;font-size:13px}
+.wfq-pillar-head{font-size:12px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin:14px 0 6px}
+.wfq-pillar-head:first-of-type{margin-top:4px}
+.wfq-answers{width:100%;border-collapse:collapse}
+.wfq-answers td{border-top:1px solid var(--line);padding:9px 8px;vertical-align:top;font-size:13.5px}
+.wfq-answers td.no{width:30px;color:var(--muted);font-weight:700}
+.wfq-answers td.pts{width:60px;text-align:right;color:var(--muted);white-space:nowrap}
+.wfq-answers .q{font-weight:600}
+.wfq-answers .a{margin-top:3px;color:var(--text)}
+.wfq-answers .opt{display:inline-block;min-width:20px;text-align:center;font-weight:800;font-size:11.5px;border-radius:6px;padding:1px 6px;margin-right:6px;background:var(--edge)}
+@media (max-width:760px){ .wfq-stats{grid-template-columns:repeat(2,minmax(0,1fr))} .wfq-hero{flex-direction:column;align-items:flex-start} }
 .fqa-bar .track{flex:1;height:10px;background:var(--line);border-radius:99px;overflow:hidden}
 .fqa-bar .fill{height:100%;background:linear-gradient(90deg,var(--gold),var(--navy))}
 .fqa-bar .val{width:54px;text-align:right;font-weight:700;font-size:12.5px}
@@ -12707,6 +12740,12 @@ async function dismissMeetingRequest(recordId, module){
 function openFqDetails(recordId){
   const rec = DB.leads.find(l=>l.id===recordId) || DB.clients.find(c=>c.id===recordId);
   const token = rec && rec.fqDocToken;
+  /* A result from the website's FQ test (no link of ours behind it) opens
+     in full from Website FQ Results (website-fq.js). */
+  if(!token && rec && typeof wfqOpenForRecord === 'function'){
+    const id = rec.convertedFromLeadId || rec.id;
+    if(wfqOpenForRecord(rec.id) || wfqOpenForRecord(id)) return;
+  }
   navigate('fqtests');
   if(token) setTimeout(()=>openFqAnswers(token), 60);
 }
@@ -35678,6 +35717,8 @@ async function loadAll(){
      firm's sample courses. */
   DB.sdcCourses = await sget('sdcCourses', null);
   DB.sdcProgress = await sget('sdcProgress', []);
+  // Every FQ test taken on the website (website-fq.js).
+  DB.websiteFqResults = await sget('websiteFqResults', []);
   if(typeof sdcEnsureLibrary === 'function') await sdcEnsureLibrary(); else if(!Array.isArray(DB.sdcCourses)) DB.sdcCourses = [];
   // multi-asset.js is its own file; a page that could not load it still opens.
   if(typeof maLoadRows === 'function') await maLoadRows();
@@ -37163,6 +37204,9 @@ function navigate(view, arg){
   } else if(view==='pqs'){
     /* a list page; a query asked for by id opens over it */
     window._pqsOpen = (arg!==undefined && arg!=='') ? arg : null;
+  } else if(view==='webfq'){
+    /* a list page; a result asked for by id opens over it */
+    if(arg!==undefined && arg!=='') setTimeout(()=>{ if(typeof wfqOpen === 'function') wfqOpen(arg); }, 60);
   } else if(view==='skills'){
     /* navigate('skills', courseId) opens that course; with no argument the
        Center stays where it was (library, a course, or the builder). */
@@ -37383,7 +37427,7 @@ async function boot(){
    ===================================================================== */
 const LIVE_KEY_TO_DB = {
   leads:'leads', clients:'clients', reviews:'reviews', tasks:'tasks', team:'team',
-  sdcCourses:'sdcCourses', sdcProgress:'sdcProgress',
+  sdcCourses:'sdcCourses', sdcProgress:'sdcProgress', websiteFqResults:'websiteFqResults',
   auditLog:'auditLog', docLinks:'docLinks', docSubmissions:'docSubmissions',
   recommendations:'recommendations', meetings:'meetings', businessEntries:'businessEntries',
   transactions:'transactions', amcs:'amcs', schemes:'schemes', commissionRates:'commissionRates',
@@ -38009,6 +38053,7 @@ function render(){
     ppf:['Partner Performance System','The funnel and each partner'],
     mypj:['My Partner Journey','Your tasks, performance and payouts'],
     skills:['Skill Development Center','Browse, manage, and learn structured skill courses'],
+    webfq:['Website FQ Results','Every FQ test taken on the website, in full'],
     myteam:['My Team','The RMs and Operations staff you have built your team with'],
     pydash:['Payout Dashboard','Brokerage, payouts and compliance'], pyimports:['Data Import','Registrar files in'],
     pyclients:['Clients & Map','The payout team and who earns on each client'], pyreports:['Brokerage Settlements','Payouts, invoices and reconciliation'],
@@ -38019,7 +38064,7 @@ function render(){
   // topbar one would just repeat it.
   const ownsHeader = (blueprintModuleFor(currentView) && window['_bpRec_'+blueprintModuleFor(currentView).type]
                       && planRecordOf(window['_bpRec_'+blueprintModuleFor(currentView).type]))
-    || ['lms','cms','rms','dst','queries','business','djt','campaigns','projects','calls','mis','pps','pms','pob','pqs','ppo','ppf','mypj','analytics','skills'].includes(currentView)
+    || ['lms','cms','rms','dst','queries','business','djt','campaigns','projects','calls','mis','pps','pms','pob','pqs','ppo','ppf','mypj','analytics','skills','webfq'].includes(currentView)
     || (typeof pyIsView === 'function' && pyIsView(currentView))
     || (currentView==='settings' && !settingsTab)
     || (currentView==='lms' && leadDetailId) || (currentView==='cms' && clientDetailId)
@@ -38103,6 +38148,7 @@ function render(){
   else if(currentView==='ppf') c.innerHTML = viewPPF();
   else if(currentView==='mypj') c.innerHTML = viewMyPartnerJourney();
   else if(currentView==='myteam') c.innerHTML = viewMyTeam();
+  else if(currentView==='webfq') c.innerHTML = typeof viewWebsiteFq === 'function' ? viewWebsiteFq() : '<div class="card"><div class="empty">Website FQ Results did not load. Reload the page.</div></div>';
   else if(currentView==='skills') c.innerHTML = typeof viewSkillCenter === 'function' ? viewSkillCenter() : '<div class="card"><div class="empty">The Skill Development Center did not load. Reload the page.</div></div>';
   else if(typeof pyIsView === 'function' && pyIsView(currentView)) c.innerHTML = pyRender(currentView);
   else { currentView='dashboard'; c.innerHTML = viewDashboard(); } // unknown view (e.g. a stale bookmark) falls back to Dashboard instead of crashing or showing stale content
@@ -38236,7 +38282,7 @@ function watchTableHeads(){
   }).observe(document.body, {childList:true, subtree:true});
 }
 const NAV_ICONS = {
-  skills:'🎓',
+  skills:'🎓', webfq:'🌐',
   dashboard:'📊', lms:'🎯', cms:'👥', rms:'📈', dst:'✅', calls:'📞',
   recommendations:'💡', meetings:'📅', calendar:'🗓️',
   business:'💰', transactions:'💳', partners:'🤝', campaigns:'📣', projects:'📁',
@@ -38252,7 +38298,7 @@ const NAV_ICONS = {
   pydash:'📊', pyimports:'⬆️', pyclients:'🗂️', pyreports:'🧾', pyrates:'💹', pypartner:'🤝', pyledger:'🏦', pyaudit:'📜', pysettings:'⚙️',
 };
 const NAV_LABELS = {
-  skills:'Skill Development Center',
+  skills:'Skill Development Center', webfq:'Website FQ Results',
   dashboard:'Dashboard', lms:'Lead Management System', lng:'LNG · Lead Nurture Group', cms:'Client Management System', rms:'Review Management System',
   dst:'DST · Service Tasks',
   recommendations:'Execution Tracker', allocpdf:'Execution Tracker', planoutput:'Plan Output', sevenevents:SE_FULL, fsl:'FSL', gab:'GAB', meetings:'Meetings', calls:'Call Logs', calendar:'Calendar', business:'Daily Business Tracker',
@@ -38342,7 +38388,7 @@ const NAV_GROUPS = [
      than a filing cabinet of copies. Nothing was deleted: the view, its rows
      and every form, submission and plan behind them are untouched, and
      'planforms' still routes for any link written against it. */
-  {id:'forms', icon:'📝', label:'Forms', items:['fqtests','iseqforms','cifforms','ctforms','profileforms'],
+  {id:'forms', icon:'📝', label:'Forms', items:['fqtests','webfq','iseqforms','cifforms','ctforms','profileforms'],
    about:'Every form sent to a lead or client, and what came back on it.'},
   {id:'operations', icon:'🛠️', label:'Operations', items:['dwt','djt','dst','queries','projects'],
    about:'The day\'s work: what is planned, what was done, what is owed and what is being chased.'},
@@ -59105,7 +59151,7 @@ function partnerPageOpen(view, u){
   const staff = isPartnerStaff(u);
   if(view === 'pqs' || view === 'skills') return true;
   if(['mypj','ppf'].includes(view)) return !staff;
-  if(['teammembers','recyclebin','import'].includes(view)) return false;
+  if(['teammembers','recyclebin','import','webfq'].includes(view)) return false;
   const g = navGroupOf(view);
   if(!g) return true;
   if(g === 'hr') return false;                     // company HR is closed below L7

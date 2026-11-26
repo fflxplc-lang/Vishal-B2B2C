@@ -155,3 +155,40 @@ The server enforces the rule in three places:
 **Where videos are kept.** `CRM_SDC_MEDIA_DIR` sets the folder. `setup.sh` sets it to `/home/vishal-b2b2c/media`, beside `data/` rather than inside it. That keeps gigabytes of video out of the data backup taken on every deploy, so back up `media/` separately. nginx allows uploads up to 1100 MB on `/api/sdc/media` only; every other address keeps the 25 MB limit.
 
 A dedicated video-upload page is not in the menu yet. Uploads go through the course builder.
+
+## Website FQ Results
+
+Every "Know Your FQ Score" test taken on the website is kept in BOSS. It appears under **Forms › Website FQ Results**: open any row to see the whole result, attempt by attempt, with Print / Save PDF and a CSV export of the list. A website lead's **More Details →** opens the same view.
+
+**What the website has to send.** It posts to `POST /api/public/website-lead` when the test is finished. Before this change it only posted when the visitor chose "Yes, connect me". Now it should post every time:
+
+```json
+{
+  "consent": false,
+  "name": "optional unless consent is true",
+  "mobile": "optional unless consent is true (10 digits)",
+  "email": "optional",
+  "city": "required when consent is true",
+  "occupation": "", "referralName": "",
+  "fq": {
+    "score": 58, "band": "Steady Saver", "points": 35, "max": 60,
+    "stage": "FQ_YOUNG", "stageLabel": "Young & Single", "completedAt": "2026-11-26T10:30:00Z",
+    "sections": [{"name": "Earn", "score": 5, "max": 8}],
+    "pillars": {"Earn": 5},
+    "answers": [{"pillar": "Earn", "question": "…", "answer": "…", "option": "A", "points": 4}]
+  }
+}
+```
+
+What BOSS does with each kind of post:
+
+- **`consent: true`**: works exactly as before. BOSS creates or updates the lead, raises the meeting request (with up to three call times in `slots`), and notifies the RM. The result is kept too, linked to the lead.
+- **`consent: false`**: BOSS keeps the result only. It creates no lead and no task, and nobody is asked to call.
+  - Name and mobile are optional, but are checked if sent.
+  - If the mobile matches an existing lead, the attempt is added to that lead's FQ history. The lead's consent and current score are not changed.
+
+**Who sees the results:**
+
+- Company staff with Everyone scope, and admins, see every result.
+- An RM on Own or Team scope sees only the results of their own leads.
+- Partners don't get the page. Through the data layer they would only receive results tied to their own leads, the same rule as an RM.

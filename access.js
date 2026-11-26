@@ -64,7 +64,9 @@ const POB_FIELDS = ['partnerPobId', 'pobId', 'fbmPobId', 'referrerPobId', 'onboa
 /* The firm's business records: cut down row by row for anybody restricted. */
 const BUSINESS_ROWS = ['leads', 'clients', 'reviews', 'recommendations', 'meetings', 'businessEntries', 'transactions',
   'communications', 'clientGoals', 'clientDocuments', 'clientFeedback', 'moms', 'callEntries', 'docLinks',
-  'docSubmissions', 'insPolicies', 'platformHoldings', 'platformSips', 'reviewEdits', 'reviewReports'];
+  'docSubmissions', 'insPolicies', 'platformHoldings', 'platformSips', 'reviewEdits', 'reviewReports',
+  // Website FQ results: an RM with Own / Team scope sees those of their own leads.
+  'websiteFqResults'];
 /* What a partner also works in, row by row. */
 const PARTNER_ROWS = BUSINESS_ROWS.concat(['tasks', 'queries', 'queryReplies', 'supportQueries', 'approvals',
   'deleteRequests', 'projects', 'projectTasks', 'projectClients', 'notifications', 'workActivities', 'djtEntries',
