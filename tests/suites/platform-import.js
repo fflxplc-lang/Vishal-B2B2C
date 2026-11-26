@@ -161,7 +161,7 @@ suite(async t => {
        handed over as its own module and kept that way so it stays
        provably unmodified. Both come off this server and neither is a
        dependency. Anything else pulled in would be a library. */
-    const OURS = /^\/(config|appraisal-engine|payout|partner-targets|partner-levels|multi-asset|client-merge|import-compare|client-import|review\/review-report)\.js(\?|$)/;
+    const OURS = /^\/(config|appraisal-engine|payout|partner-targets|partner-levels|multi-asset|skill-center|client-merge|import-compare|client-import|review\/review-report)\.js(\?|$)/;
     const r = await t.eval(()=>({supported: xlsxSupported(),
       lib: typeof window.XLSX,
       all: Array.from(document.querySelectorAll('script[src]')).map(s=>s.src),

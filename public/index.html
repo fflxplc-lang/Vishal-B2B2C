@@ -18,6 +18,9 @@
      their dashboards and the SIPs page. Its own file because it is a
      module of its own; it only defines functions, and BOSS calls them. -->
 <script src="/multi-asset.js"></script>
+<!-- Skill Development Center: the learning library (course library, lesson player, course builder). -->
+<script src="/skill-center.js"></script>
+<link rel="stylesheet" href="/skill-center.css">
 <!-- Merge Clients: duplicate detection, the merge, and the names a merged
      client is also known by, which the import matching reads. -->
 <script src="/client-merge.js"></script>
@@ -35656,6 +35659,12 @@ async function loadAll(){
   DB.aumMonthly = await sget('aumMonthly', []);
   DB.platformSips = await sget('platformSips', []);
   DB.assetUploads = await sget('assetUploads', []);
+  /* Skill Development Center (skill-center.js): courses, and each person's
+     progress through them. A library never saved before starts with the
+     firm's sample courses. */
+  DB.sdcCourses = await sget('sdcCourses', null);
+  DB.sdcProgress = await sget('sdcProgress', []);
+  if(typeof sdcEnsureLibrary === 'function') await sdcEnsureLibrary(); else if(!Array.isArray(DB.sdcCourses)) DB.sdcCourses = [];
   // multi-asset.js is its own file; a page that could not load it still opens.
   if(typeof maLoadRows === 'function') await maLoadRows();
   DB.reviewEdits = await sget('reviewEdits', []);
@@ -36627,7 +36636,8 @@ function pageAllowList(user){
    anything refused puts them. A page allow-list narrows what of the
    firm somebody sees; it was never meant to take away their own
    record. */
-const PERSONAL_PAGES = ['profile', 'dashboard'];
+// Learning is for everybody, partners included: the Skill Development Center opens for all.
+const PERSONAL_PAGES = ['profile', 'dashboard', 'skills'];
 /* Payouts is gated by its own team list on the server (Payouts › Clients &
    Map › Hierarchy), not by the page allow-list: being on the payout team
    is what opens it, and only to your own clients and earnings. */
@@ -37139,6 +37149,10 @@ function navigate(view, arg){
   } else if(view==='pqs'){
     /* a list page; a query asked for by id opens over it */
     window._pqsOpen = (arg!==undefined && arg!=='') ? arg : null;
+  } else if(view==='skills'){
+    /* navigate('skills', courseId) opens that course; with no argument the
+       Center stays where it was (library, a course, or the builder). */
+    window._sdcArg = (arg!==undefined && arg!=='') ? arg : null;
   } else if(['ppo','ppf','mypj','myteam'].includes(view)){
     /* list pages with nothing open on them */
   } else if(view==='dst'){
@@ -37355,6 +37369,7 @@ async function boot(){
    ===================================================================== */
 const LIVE_KEY_TO_DB = {
   leads:'leads', clients:'clients', reviews:'reviews', tasks:'tasks', team:'team',
+  sdcCourses:'sdcCourses', sdcProgress:'sdcProgress',
   auditLog:'auditLog', docLinks:'docLinks', docSubmissions:'docSubmissions',
   recommendations:'recommendations', meetings:'meetings', businessEntries:'businessEntries',
   transactions:'transactions', amcs:'amcs', schemes:'schemes', commissionRates:'commissionRates',
@@ -37978,6 +37993,7 @@ function render(){
     ppo:['Partner Payout System','What each partner is owed and paid'],
     ppf:['Partner Performance System','The funnel and each partner'],
     mypj:['My Partner Journey','Your tasks, performance and payouts'],
+    skills:['Skill Development Center','Browse, manage, and learn structured skill courses'],
     myteam:['My Team','The RMs and Operations staff you have built your team with'],
     pydash:['Payout Dashboard','Brokerage, payouts and compliance'], pyimports:['Data Import','Registrar files in'],
     pyclients:['Clients & Map','The payout team and who earns on each client'], pyreports:['Brokerage Settlements','Payouts, invoices and reconciliation'],
@@ -37988,7 +38004,7 @@ function render(){
   // topbar one would just repeat it.
   const ownsHeader = (blueprintModuleFor(currentView) && window['_bpRec_'+blueprintModuleFor(currentView).type]
                       && planRecordOf(window['_bpRec_'+blueprintModuleFor(currentView).type]))
-    || ['lms','cms','rms','dst','queries','business','djt','campaigns','projects','calls','mis','pps','pms','pob','pqs','ppo','ppf','mypj','analytics'].includes(currentView)
+    || ['lms','cms','rms','dst','queries','business','djt','campaigns','projects','calls','mis','pps','pms','pob','pqs','ppo','ppf','mypj','analytics','skills'].includes(currentView)
     || (typeof pyIsView === 'function' && pyIsView(currentView))
     || (currentView==='settings' && !settingsTab)
     || (currentView==='lms' && leadDetailId) || (currentView==='cms' && clientDetailId)
@@ -38072,6 +38088,7 @@ function render(){
   else if(currentView==='ppf') c.innerHTML = viewPPF();
   else if(currentView==='mypj') c.innerHTML = viewMyPartnerJourney();
   else if(currentView==='myteam') c.innerHTML = viewMyTeam();
+  else if(currentView==='skills') c.innerHTML = typeof viewSkillCenter === 'function' ? viewSkillCenter() : '<div class="card"><div class="empty">The Skill Development Center did not load. Reload the page.</div></div>';
   else if(typeof pyIsView === 'function' && pyIsView(currentView)) c.innerHTML = pyRender(currentView);
   else { currentView='dashboard'; c.innerHTML = viewDashboard(); } // unknown view (e.g. a stale bookmark) falls back to Dashboard instead of crashing or showing stale content
   seAlignTables();
@@ -38204,6 +38221,7 @@ function watchTableHeads(){
   }).observe(document.body, {childList:true, subtree:true});
 }
 const NAV_ICONS = {
+  skills:'🎓',
   dashboard:'📊', lms:'🎯', cms:'👥', rms:'📈', dst:'✅', calls:'📞',
   recommendations:'💡', meetings:'📅', calendar:'🗓️',
   business:'💰', transactions:'💳', partners:'🤝', campaigns:'📣', projects:'📁',
@@ -38219,6 +38237,7 @@ const NAV_ICONS = {
   pydash:'📊', pyimports:'⬆️', pyclients:'🗂️', pyreports:'🧾', pyrates:'💹', pypartner:'🤝', pyledger:'🏦', pyaudit:'📜', pysettings:'⚙️',
 };
 const NAV_LABELS = {
+  skills:'Skill Development Center',
   dashboard:'Dashboard', lms:'Lead Management System', lng:'LNG · Lead Nurture Group', cms:'Client Management System', rms:'Review Management System',
   dst:'DST · Service Tasks',
   recommendations:'Execution Tracker', allocpdf:'Execution Tracker', planoutput:'Plan Output', sevenevents:SE_FULL, fsl:'FSL', gab:'GAB', meetings:'Meetings', calls:'Call Logs', calendar:'Calendar', business:'Daily Business Tracker',
@@ -38331,6 +38350,10 @@ const NAV_GROUPS = [
    about:'Who is in the business, what they may do and what they own. Administered in Setup.'},
   {id:'insights', icon:'🔎', label:'Insights', items:['analytics','reports','mis'],
    about:'What the numbers say — the reports to pull, and the management view over all of them.'},
+  /* The firm's learning library (skill-center.js): structured courses for
+     employees and partners alike, built in the Center's own course builder. */
+  {id:'learning', icon:'🎓', label:'Skill Development', items:['skills'],
+   about:'Structured skill courses — the library, the lesson player and the course builder.'},
   /* HR is a section of its own, with its own records, its own
      configuration and its own access. It is in the rail for everybody
      because everybody has their own attendance to punch; what opens
@@ -59065,7 +59088,7 @@ function partnerPageOpen(view, u){
   if(isAdmin(u)) return true;                      // L7
   if(view === 'myteam') return plvMayBuildTeam(u);
   const staff = isPartnerStaff(u);
-  if(view === 'pqs') return true;
+  if(view === 'pqs' || view === 'skills') return true;
   if(['mypj','ppf'].includes(view)) return !staff;
   if(['teammembers','recyclebin','import'].includes(view)) return false;
   const g = navGroupOf(view);

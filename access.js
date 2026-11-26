@@ -69,12 +69,15 @@ const BUSINESS_ROWS = ['leads', 'clients', 'reviews', 'recommendations', 'meetin
 const PARTNER_ROWS = BUSINESS_ROWS.concat(['tasks', 'queries', 'queryReplies', 'supportQueries', 'approvals',
   'deleteRequests', 'projects', 'projectTasks', 'projectClients', 'notifications', 'workActivities', 'djtEntries',
   'auditLog', 'accessRequests', 'partnerProspects', 'pjPartners', 'partnerQueries', 'partnerPayouts',
-  'partnerReferrals', 'pjOnboarding', 'pjDocuments', 'pjSessions', 'pjTraining', 'pjReviews', 'aumMonthly']);
+  'partnerReferrals', 'pjOnboarding', 'pjDocuments', 'pjSessions', 'pjTraining', 'pjReviews', 'aumMonthly',
+  // Skill Development Center: each person's own progress (userId).
+  'sdcProgress']);
 /* Company HR: a partner sees only their own rows (and their own staff's on L5+). */
 const HR_ROWS = ['hrAttendance', 'hrLeave', 'hrRegularizations', 'hrCompOff', 'hrIncentives', 'hrAppraisals'];
 /* Read-only reference a partner's screens need to draw. */
 const PARTNER_SHARED = ['config', 'settings', 'systemState', 'hrConfig', 'amcs', 'schemes', 'multiProductSchemes',
-  'sops', 'slaRules', 'automationRules', 'campaignTemplates', 'complianceItems', 'pjWorkflows', 'partnerWebinars'];
+  'sops', 'slaRules', 'automationRules', 'campaignTemplates', 'complianceItems', 'pjWorkflows', 'partnerWebinars',
+  'sdcCourses'];
 /* Per-file stores a partner may use: attachments on their own queries. */
 const PARTNER_FILE_PREFIXES = ['qfile.', 'qFile.', 'queryFile.'];
 // Everything else (connectors, logs, imports, backups, payout rates, …) is closed to a partner.
